@@ -104,7 +104,6 @@ const SLICE_COLOR: [f32; 4] = [1.0, 0.2, 0.9, 1.0];
 // MV convention: forward (L0) green, backward (L1) red.
 const MV_L0_COLOR: [f32; 4] = [0.2, 0.95, 0.3, 1.0];
 const MV_L1_COLOR: [f32; 4] = [0.95, 0.25, 0.2, 1.0];
-const GRID_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 const VALUE_COLOR: [f32; 4] = [1.0, 0.95, 0.2, 1.0];
 
 pub fn build_segments(
@@ -130,9 +129,6 @@ pub fn build_segments(
         (0, 0)
     };
 
-    // Any filled overlay gets a dark block grid on top.
-    let filled = settings.qp_heatmap || settings.types || settings.sizes;
-
     for cu in &analysis.cus {
         if settings.sizes {
             if let Some(bits) = cu.bits {
@@ -149,9 +145,6 @@ pub fn build_segments(
         }
         if settings.types {
             out.push(Segment::fill(cu.rect, type_color(analysis, cu, a)));
-        }
-        if filled {
-            Segment::outline(cu.rect, w * 0.6, GRID_COLOR, out);
         }
         if settings.partitions {
             for tu in analysis.tus_of(cu) {
