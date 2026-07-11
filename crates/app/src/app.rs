@@ -21,9 +21,6 @@ use crate::widgets::frame_view::{self, ChannelMode, ColorMatrix, FrameView, Zoom
 use crate::widgets::overlays::{self, Glyph, OverlaySettings, Segment};
 use crate::worker::{self, Command};
 
-/// Bytes fetched per hex-view window (1024 rows of 16).
-const HEX_WINDOW: usize = 16 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Playback {
     #[default]
@@ -125,20 +122,12 @@ pub struct App {
     glyphs: Arc<Vec<Glyph>>,
 
     tab: Tab,
-    pixels_plane: usize,
-    pixels_hex: bool,
     /// HRD buffer model, computed once per opened stream.
     hrd: Option<HrdView>,
     /// Headers of the current frame (None while loading).
     headers: Option<(u32, Arc<Vec<streamlens_syntax::analyzer::RecordedNal>>)>,
     header_expanded: HashSet<Vec<usize>>,
     header_filter: String,
-    /// ES window for the hex view: (window offset, bytes).
-    hex: Option<(u64, Arc<Vec<u8>>)>,
-    /// Manual hex-view position; None follows the current frame's AU.
-    hex_offset: Option<u64>,
-    /// Contents of the hex go-to-offset input.
-    hex_input: String,
 
     panes: pane_grid::State<Pane>,
     error: Option<String>,
@@ -203,10 +192,6 @@ pub enum Message {
     ToggleOrder,
     ToggleQpGraph(bool),
     ToggleBitsSplit(bool),
-    HexInput(String),
-    HexGo,
-    /// Page the hex window forward/backward by one window.
-    HexPage(i32),
     ZoomIn,
     ZoomOut,
     ZoomFit,
@@ -220,8 +205,6 @@ pub enum Message {
     PaneResized(pane_grid::ResizeEvent),
     PaneDragged(pane_grid::DragEvent),
     SelectTab(Tab),
-    TogglePixelsHex,
-    CyclePixelsPlane,
     ToggleHeaderNode(Vec<usize>),
     HeaderFilter(String),
     DismissError,
@@ -299,15 +282,10 @@ impl App {
             segments: Arc::new(Vec::new()),
             glyphs: Arc::new(Vec::new()),
             tab: tab_from_env(),
-            pixels_plane: 0,
-            pixels_hex: false,
             hrd: None,
             headers: None,
             header_expanded: HashSet::new(),
             header_filter: String::new(),
-            hex: None,
-            hex_offset: None,
-            hex_input: String::new(),
             panes,
             error: None,
             sweep: Vec::new(),
@@ -456,32 +434,6 @@ impl App {
                 self.bits_split = v;
                 Task::none()
             }
-            Message::HexInput(s) => {
-                self.hex_input = s;
-                Task::none()
-            }
-            Message::HexGo => {
-                let parsed =
-                    u64::from_str_radix(self.hex_input.trim().trim_start_matches("0x"), 16);
-                if let (Ok(v), Some(index)) = (parsed, &self.index) {
-                    self.hex_offset = Some((v & !15).min(index.es_size.saturating_sub(1) & !15));
-                    self.hex = None;
-                    self.request_panel_data();
-                }
-                Task::none()
-            }
-            Message::HexPage(d) => {
-                if let Some(index) = &self.index {
-                    let es_size = index.es_size;
-                    let au_offset = index.frames[self.current as usize].byte_offset;
-                    let base = self.hex_offset.unwrap_or(au_offset & !15);
-                    let next = base.saturating_add_signed(d as i64 * HEX_WINDOW as i64);
-                    self.hex_offset = Some(next.min(es_size.saturating_sub(1) & !15));
-                    self.hex = None;
-                    self.request_panel_data();
-                }
-                Task::none()
-            }
             Message::ZoomIn => {
                 self.set_zoom(self.effective_zoom * 1.4);
                 Task::none()
@@ -571,14 +523,6 @@ impl App {
             Message::SelectTab(tab) => {
                 self.tab = tab;
                 self.request_panel_data();
-                Task::none()
-            }
-            Message::TogglePixelsHex => {
-                self.pixels_hex = !self.pixels_hex;
-                Task::none()
-            }
-            Message::CyclePixelsPlane => {
-                self.pixels_plane = (self.pixels_plane + 1) % 3;
                 Task::none()
             }
             Message::ToggleHeaderNode(path) => {
@@ -776,9 +720,6 @@ impl App {
                 self.rebuild_segments();
                 self.rebuild_stage_image();
             }
-            worker::Event::EsBytes { offset, bytes } => {
-                self.hex = Some((offset, bytes));
-            }
             worker::Event::Headers(idx, h) => {
                 if idx == self.current {
                     self.headers = Some((idx, h));
@@ -833,9 +774,6 @@ impl App {
         self.hovered_bar = None;
         self.hovered_pixel = None;
         self.selected_pixel = None;
-        self.hex = None;
-        self.hex_offset = None;
-        self.hex_input.clear();
         self.headers = None;
         self.header_expanded.clear();
         self.header_filter.clear();
@@ -862,9 +800,6 @@ impl App {
         self.current = clamped;
         self.selected_pixel = None;
         self.headers = None;
-        self.hex = None;
-        // The hex view follows the frame again after manual navigation.
-        self.hex_offset = None;
         self.request_frame(clamped);
         self.request_panel_data();
         Task::none()
@@ -932,17 +867,6 @@ impl App {
         self.stage_image = result.map(Arc::new);
     }
 
-    /// Start of the hex window: manual position or the current AU, aligned
-    /// to a 16-byte row.
-    fn hex_window_start(&self) -> u64 {
-        self.hex_offset.unwrap_or_else(|| {
-            self.index
-                .as_ref()
-                .map(|i| i.frames[self.current as usize].byte_offset & !15)
-                .unwrap_or(0)
-        })
-    }
-
     /// Fetch data the visible side panel needs for the current frame.
     fn request_panel_data(&self) {
         let (Some(tx), Some(_)) = (&self.worker, &self.index) else {
@@ -956,12 +880,6 @@ impl App {
                     .is_none_or(|(i, _)| *i != self.current) =>
             {
                 let _ = tx.send(Command::Headers(self.current));
-            }
-            Tab::Hex => {
-                let start = self.hex_window_start();
-                if self.hex.as_ref().is_none_or(|(o, _)| *o != start) {
-                    let _ = tx.send(Command::EsBytes(start, HEX_WINDOW));
-                }
             }
             _ => {}
         }
@@ -1189,20 +1107,6 @@ impl App {
                 &self.header_expanded,
                 &self.header_filter,
             ),
-            (Some(index), Tab::Hex) => {
-                let f = &index.frames[self.current as usize];
-                let start = self.hex_window_start();
-                panels::hex_view(
-                    start,
-                    self.hex
-                        .as_ref()
-                        .filter(|(o, _)| *o == start)
-                        .map(|(_, b)| b),
-                    (f.byte_offset, f.byte_offset + f.size_bytes as u64),
-                    index.es_size,
-                    &self.hex_input,
-                )
-            }
             (Some(index), Tab::Stats) => panels::stats_view(
                 index,
                 self.frame.as_ref().and_then(|f| f.analysis.as_deref()),
@@ -1222,15 +1126,6 @@ impl App {
                     .into(),
             },
             (Some(index), Tab::Dpb) => panels::dpb_view(index, self.current),
-            (Some(_), Tab::Pixels) => panels::pixels_view(
-                self.stage_image
-                    .as_deref()
-                    .or(self.frame.as_ref().map(|f| &f.image)),
-                self.displayed_image_name(),
-                self.hovered_pixel.or(self.selected_pixel),
-                self.pixels_plane,
-                self.pixels_hex,
-            ),
         };
         column![bar, body].into()
     }
@@ -1367,15 +1262,6 @@ impl App {
         match self.index.as_ref().map(|i| i.codec) {
             Some(streamlens_types::Codec::H264) => Some(("MB", x as u32 / 16, y as u32 / 16)),
             _ => None,
-        }
-    }
-
-    /// Name of the image currently displayed (and sampled by the Pixels
-    /// panel): stage plus active diff mode.
-    fn displayed_image_name(&self) -> String {
-        match self.diff {
-            DiffMode::Off => self.stage.label().to_string(),
-            d => format!("{} · {d}", self.stage.label()),
         }
     }
 
@@ -1601,13 +1487,11 @@ fn stage_from_env() -> Stage {
     }
 }
 
-/// Debug/testing hook: STREAMLENS_TAB=pixels|stream|headers|hex|stats|buffer|dpb
+/// Debug/testing hook: STREAMLENS_TAB=stream|headers|stats|buffer|dpb
 fn tab_from_env() -> Tab {
     match std::env::var("STREAMLENS_TAB").as_deref() {
-        Ok("pixels") => Tab::Pixels,
         Ok("stream") => Tab::Stream,
         Ok("headers") => Tab::Headers,
-        Ok("hex") => Tab::Hex,
         Ok("stats") => Tab::Stats,
         Ok("buffer") => Tab::Buffer,
         Ok("dpb") => Tab::Dpb,

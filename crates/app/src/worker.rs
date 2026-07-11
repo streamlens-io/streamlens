@@ -29,8 +29,6 @@ pub enum Command {
         on: bool,
         refresh: u32,
     },
-    /// Read bytes from the ES cache (hex viewer): offset, length.
-    EsBytes(u64, usize),
     /// Recorded syntax trees for a frame's AU (Headers panel).
     Headers(u32),
     /// Set (or clear) the reference YUV path; restarts the sweep.
@@ -48,10 +46,6 @@ pub enum Event {
     },
     Opened(Arc<StreamIndex>),
     Frame(Arc<DecodedFrame>),
-    EsBytes {
-        offset: u64,
-        bytes: Arc<Vec<u8>>,
-    },
     Headers(u32, Arc<Vec<streamlens_syntax::analyzer::RecordedNal>>),
     /// Playback reached the last frame (or failed) and stopped.
     PlayEnded,
@@ -198,19 +192,6 @@ impl Worker {
                     s.set_stages(on);
                     self.deliver(refresh);
                 }
-            }
-            Command::EsBytes(offset, len) => {
-                let Some(s) = self.session.as_ref() else {
-                    return;
-                };
-                let event = match s.es_bytes(offset, len) {
-                    Ok(b) => Event::EsBytes {
-                        offset,
-                        bytes: Arc::new(b),
-                    },
-                    Err(e) => Event::Error(e.to_string()),
-                };
-                self.send(event);
             }
             Command::Headers(idx) => {
                 let Some(s) = self.session.as_ref() else {

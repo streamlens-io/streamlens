@@ -161,8 +161,8 @@ Rendering: three custom wgpu pipelines inside iced `shader` widgets —
   keyframe ticks, QP steps and the selection cursor; 100k frames is one
   draw call.
 
-`panels.rs` holds the side-panel views (Info/Pixels/Stream/Headers/Hex/
-Stats/Buffer/DPB) and the Block Info view shown in its own pane
+`panels.rs` holds the side-panel views (Info/Stream/Headers/Stats/
+Buffer/DPB) and the Block Info view shown in its own pane
 with a cursor-following magnifier; `stages.rs` the stage/diff image
 conversions.
 

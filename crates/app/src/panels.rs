@@ -1,5 +1,5 @@
 //! Side-panel views: Stream Viewer (NAL tree), Headers (syntax field tree),
-//! HEX viewer, Statistics, Buffer (HRD), DPB, Pixels and Block Info.
+//! Statistics, Buffer (HRD), DPB and Block Info.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,22 +19,18 @@ use crate::theme;
 pub enum Tab {
     #[default]
     Info,
-    Pixels,
     Stream,
     Headers,
-    Hex,
     Stats,
     Buffer,
     Dpb,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Info,
-        Tab::Pixels,
         Tab::Stream,
         Tab::Headers,
-        Tab::Hex,
         Tab::Stats,
         Tab::Buffer,
         Tab::Dpb,
@@ -43,10 +39,8 @@ impl Tab {
     pub fn label(&self) -> &'static str {
         match self {
             Tab::Info => "Info",
-            Tab::Pixels => "Pixels",
             Tab::Stream => "Stream",
             Tab::Headers => "Headers",
-            Tab::Hex => "Hex",
             Tab::Stats => "Stats",
             Tab::Buffer => "Buffer",
             Tab::Dpb => "DPB",
@@ -338,96 +332,6 @@ pub fn block_view<'a>(
     }
 
     scrollable(col.padding(10)).width(Fill).height(Fill).into()
-}
-
-/// HEX viewer: a pageable window into the whole elementary stream with the
-/// current frame's AU highlighted. Navigate with the offset box (hex) and
-/// the page buttons.
-pub fn hex_view<'a>(
-    window_offset: u64,
-    bytes: Option<&'a Arc<Vec<u8>>>,
-    au_range: (u64, u64),
-    es_size: u64,
-    addr_input: &'a str,
-) -> Element<'a, Message> {
-    let controls = row![
-        button(text("◀").size(11))
-            .padding([1, 6])
-            .style(button::secondary)
-            .on_press(Message::HexPage(-1)),
-        button(text("▶").size(11))
-            .padding([1, 6])
-            .style(button::secondary)
-            .on_press(Message::HexPage(1)),
-        iced::widget::text_input("offset (hex)…", addr_input)
-            .on_input(Message::HexInput)
-            .on_submit(Message::HexGo)
-            .size(11)
-            .padding(3)
-            .width(110),
-        button(text("Go").size(11))
-            .padding([1, 6])
-            .style(button::secondary)
-            .on_press(Message::HexGo),
-        text(format!(
-            "AU @ {:#x} · {} B · ES {} B",
-            au_range.0,
-            au_range.1 - au_range.0,
-            es_size
-        ))
-        .size(11),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
-
-    let mut col = column![controls].spacing(1);
-
-    let Some(bytes) = bytes else {
-        col = col.push(text("loading bytes…").size(12));
-        return container(col.padding(8)).into();
-    };
-
-    const PER_ROW: usize = 16;
-    // Column header.
-    let header: String = (0..PER_ROW)
-        .map(|i| format!("{}{i:02X} ", if i == 8 { " " } else { "" }))
-        .collect();
-    col = col.push(
-        text(format!("{:>8}  {header}", "offset"))
-            .size(11)
-            .font(iced::Font::MONOSPACE)
-            .color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.45)),
-    );
-
-    let dim = iced::Color::from_rgba(1.0, 1.0, 1.0, 0.45);
-    for (r, chunk) in bytes.chunks(PER_ROW).enumerate() {
-        let addr = window_offset + (r * PER_ROW) as u64;
-        let hex: String = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, b)| format!("{}{b:02X} ", if i == 8 { " " } else { "" }))
-            .collect();
-        let ascii: String = chunk
-            .iter()
-            .map(|&b| {
-                if (0x20..0x7F).contains(&b) {
-                    b as char
-                } else {
-                    '·'
-                }
-            })
-            .collect();
-        let in_au = addr + PER_ROW as u64 > au_range.0 && addr < au_range.1;
-        let mut t = text(format!("{addr:08X}  {hex:<49} {ascii}"))
-            .size(11)
-            .font(iced::Font::MONOSPACE);
-        if !in_au {
-            t = t.color(dim);
-        }
-        col = col.push(t);
-    }
-
-    scrollable(col.padding(8)).width(Fill).height(Fill).into()
 }
 
 /// Category label color for statistics sections.
@@ -788,107 +692,4 @@ pub fn dpb_view(index: &StreamIndex, current: u32) -> Element<'_, Message> {
         col = col.push(text("empty").size(12));
     }
     scrollable(col.padding(10)).width(Fill).height(Fill).into()
-}
-
-/// Pixels panel: numeric sample values of the displayed image around the
-/// selected pixel, per plane, dec or hex. `source` names which image is
-/// sampled (stage/diff selection), so converted values aren't mistaken for
-/// decoded output.
-pub fn pixels_view<'a>(
-    image: Option<&'a streamlens_types::PlanarImage>,
-    source: String,
-    pixel: Option<(u16, u16)>,
-    plane: usize,
-    hex: bool,
-) -> Element<'a, Message> {
-    let Some(img) = image else {
-        return container(text("no frame").size(12)).padding(10).into();
-    };
-    let Some((px, py)) = pixel else {
-        return container(text("hover a pixel in the video view").size(12))
-            .padding(10)
-            .into();
-    };
-    let plane = plane.min(img.planes.len() - 1);
-    let (pw, ph) = img.plane_dims(plane);
-    // Map luma coords to the plane's resolution.
-    let (sx, sy) = if plane == 0 {
-        (px as u32, py as u32)
-    } else {
-        (
-            px as u32 * pw / img.width.max(1),
-            py as u32 * ph / img.height.max(1),
-        )
-    };
-
-    const SPAN: u32 = 8;
-    let x0 = sx.saturating_sub(SPAN);
-    let y0 = sy.saturating_sub(SPAN);
-
-    let mut col = column![row![
-        text(format!(
-            "{source} — plane {} ({}) around ({sx}, {sy})",
-            plane,
-            ["Y", "Cb", "Cr"].get(plane).unwrap_or(&"?")
-        ))
-        .size(12),
-        button(text(if hex { "hex" } else { "dec" }).size(11))
-            .padding([1, 6])
-            .style(button::secondary)
-            .on_press(Message::TogglePixelsHex),
-        button(text(["Y", "Cb", "Cr"][plane]).size(11))
-            .padding([1, 6])
-            .style(button::secondary)
-            .on_press(Message::CyclePixelsPlane),
-    ]
-    .spacing(6)]
-    .spacing(1);
-
-    let bps = img.bytes_per_sample() as usize;
-    let sample = |x: u32, y: u32| -> Option<u16> {
-        if x >= pw || y >= ph {
-            return None;
-        }
-        let idx = (y * pw + x) as usize * bps;
-        let data = &img.planes[plane];
-        if bps == 2 {
-            Some(u16::from_le_bytes([*data.get(idx)?, *data.get(idx + 1)?]))
-        } else {
-            data.get(idx).map(|&v| v as u16)
-        }
-    };
-
-    // Header row with x coordinates.
-    let mut header = String::from("      ");
-    for x in x0..(x0 + 2 * SPAN + 1).min(pw) {
-        header.push_str(&if hex {
-            format!("{x:>5x}")
-        } else {
-            format!("{x:>5}")
-        });
-    }
-    col = col.push(text(header).size(10).font(iced::Font::MONOSPACE));
-
-    for y in y0..(y0 + 2 * SPAN + 1).min(ph) {
-        let mut line = if hex {
-            format!("{y:>5x} ")
-        } else {
-            format!("{y:>5} ")
-        };
-        for x in x0..(x0 + 2 * SPAN + 1).min(pw) {
-            match sample(x, y) {
-                Some(v) if hex => line.push_str(&format!("{v:>5x}")),
-                Some(v) => line.push_str(&format!("{v:>5}")),
-                None => line.push_str("    ."),
-            }
-        }
-        let is_center = y == sy;
-        let mut t = text(line).size(10).font(iced::Font::MONOSPACE);
-        if is_center {
-            t = t.color(iced::Color::from_rgb(1.0, 0.95, 0.2));
-        }
-        col = col.push(t);
-    }
-
-    scrollable(col.padding(8)).width(Fill).height(Fill).into()
 }

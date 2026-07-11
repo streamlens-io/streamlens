@@ -76,8 +76,8 @@ and a guided reading order.
 Toolbar toggles select overlays (partitions, motion vectors, types, QP
 heat, bit-allocation heat, slice boundaries, on-video values) and chart
 lines (QP, intra/inter/skip bit split, PSNR against a reference YUV).
-Side panels: Info, Pixels, Stream (NALs), Headers (syntax tree), Hex,
-Stats, Buffer (HRD), DPB. Panes are draggable and resizable.
+Side panels: Info, Stream (NALs), Headers (syntax tree), Stats, Buffer
+(HRD), DPB. Panes are draggable and resizable.
 
 ## Known limitations
 
