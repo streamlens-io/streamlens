@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            clang libclang-dev nasm cmake pkg-config
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install gstreamer nasm cmake pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache vendored decoders
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/ffmpeg-prefix
+            vendor/libde265-prefix
+            vendor/.stamp
+          key: vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build patched decoders
+        run: ./vendor/build-decoders.sh
+
+      - name: Build
+        run: cargo build --release -p streamlens
+
+      - name: Package
+        run: |
+          name="streamlens-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/release/streamlens README.md \
+            LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md "$name/"
+          cp -R licenses "$name/licenses"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            streamlens-*.tar.gz
+            streamlens-*.tar.gz.sha256

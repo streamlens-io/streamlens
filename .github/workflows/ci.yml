@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            clang libclang-dev nasm cmake pkg-config ffmpeg
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install gstreamer nasm cmake pkg-config ffmpeg
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache vendored decoders
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/ffmpeg-prefix
+            vendor/libde265-prefix
+            vendor/.stamp
+          key: vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build patched decoders
+        run: ./vendor/build-decoders.sh
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
