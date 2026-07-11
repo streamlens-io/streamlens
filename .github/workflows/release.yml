@@ -78,3 +78,63 @@ jobs:
           files: |
             streamlens-*.tar.gz
             streamlens-*.tar.gz.sha256
+
+  build-windows:
+    name: build (x86_64-pc-windows-gnu)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            git make diffutils zip
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-rust
+            mingw-w64-x86_64-gstreamer
+            mingw-w64-x86_64-gst-plugins-base
+            mingw-w64-x86_64-gst-plugins-good
+            mingw-w64-x86_64-gst-plugins-bad
+
+      - name: Cache vendored decoders
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/ffmpeg-prefix
+            vendor/libde265-prefix
+            vendor/.stamp
+          key: vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
+
+      - name: Build patched decoders
+        run: ./vendor/build-decoders.sh
+
+      - name: Build
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo build --release -p streamlens
+
+      - name: Package
+        run: |
+          name="streamlens-${GITHUB_REF_NAME}-x86_64-pc-windows-gnu"
+          mkdir "$name"
+          cp target/release/streamlens.exe README.md \
+            LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md "$name/"
+          cp -R licenses "$name/licenses"
+          zip -r "$name.zip" "$name"
+          sha256sum "$name.zip" > "$name.zip.sha256"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            streamlens-*.zip
+            streamlens-*.zip.sha256

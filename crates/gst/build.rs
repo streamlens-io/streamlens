@@ -91,15 +91,35 @@ fn main() {
     println!("cargo:rustc-link-lib=static=de265");
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
-    // libde265 is C++.
-    println!("cargo:rustc-link-lib=c++");
-    if cfg!(target_os = "macos") {
-        println!("cargo:rustc-link-lib=framework=CoreFoundation");
-        println!("cargo:rustc-link-lib=framework=CoreVideo");
-        println!("cargo:rustc-link-lib=framework=CoreMedia");
-        println!("cargo:rustc-link-lib=framework=VideoToolbox");
-        println!("cargo:rustc-link-lib=framework=CoreServices");
+
+    // cfg!() in a build script reflects the host, not the target.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    match target_os.as_str() {
+        // libde265 is C++: libc++ on macOS, libstdc++ elsewhere.
+        "macos" => {
+            println!("cargo:rustc-link-lib=c++");
+            for fw in [
+                "CoreFoundation",
+                "CoreVideo",
+                "CoreMedia",
+                "VideoToolbox",
+                "CoreServices",
+            ] {
+                println!("cargo:rustc-link-lib=framework={fw}");
+            }
+            println!("cargo:rustc-link-lib=z");
+            println!("cargo:rustc-link-lib=m");
+        }
+        // MinGW (x86_64-pc-windows-gnu): no separate libm/libz, and
+        // libavutil's random_seed uses BCryptGenRandom.
+        "windows" => {
+            println!("cargo:rustc-link-lib=stdc++");
+            println!("cargo:rustc-link-lib=bcrypt");
+        }
+        _ => {
+            println!("cargo:rustc-link-lib=stdc++");
+            println!("cargo:rustc-link-lib=z");
+            println!("cargo:rustc-link-lib=m");
+        }
     }
-    println!("cargo:rustc-link-lib=z");
-    println!("cargo:rustc-link-lib=m");
 }

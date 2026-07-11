@@ -9,7 +9,6 @@
 //! everything to byte offsets.
 
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -225,7 +224,7 @@ impl DecodeService {
                 }
                 let rec = &index.frames[live.fed as usize];
                 let mut au = vec![0u8; rec.size_bytes as usize];
-                self.es_file.read_exact_at(&mut au, rec.byte_offset)?;
+                crate::read_exact_at(&self.es_file, &mut au, rec.byte_offset)?;
                 live.appsrc
                     .push_buffer(gst::Buffer::from_mut_slice(au))
                     .map_err(|e| Error::Pipeline(format!("push: {e:?}")))?;

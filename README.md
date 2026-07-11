@@ -14,7 +14,7 @@ analysis to every decoded frame; the UI is [iced](https://iced.rs) on wgpu.
 
 ## Install
 
-Grab a binary for macOS or Linux from
+Grab a binary for macOS, Linux or Windows from
 [Releases](../../releases), then install the one runtime dependency:
 
 ```sh
@@ -24,6 +24,10 @@ brew install gstreamer
 # Debian/Ubuntu
 sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 ```
+
+On Windows, install the GStreamer **MinGW 64-bit** runtime from
+[gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/)
+and add its `bin\` directory to `PATH`.
 
 Run it:
 
@@ -44,6 +48,10 @@ brew install gstreamer nasm cmake pkg-config
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   clang libclang-dev nasm cmake pkg-config
+
+# Windows (MSYS2 MINGW64 shell; MSYS2's Rust targets x86_64-pc-windows-gnu)
+pacman -S git make diffutils mingw-w64-x86_64-{toolchain,cmake,ninja,nasm,pkg-config,clang,rust} \
+  mingw-w64-x86_64-{gstreamer,gst-plugins-base,gst-plugins-good,gst-plugins-bad}
 ```
 
 ```sh

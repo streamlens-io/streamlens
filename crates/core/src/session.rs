@@ -177,10 +177,9 @@ impl Session {
     /// Reads raw bytes from the elementary-stream cache (hex viewer),
     /// truncated to the stream end.
     pub fn es_bytes(&self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
-        use std::os::unix::fs::FileExt;
         let avail = self.index.es_size.saturating_sub(offset) as usize;
         let mut buf = vec![0u8; len.min(avail)];
-        self.es_file.read_exact_at(&mut buf, offset)?;
+        crate::read_exact_at(&self.es_file, &mut buf, offset)?;
         Ok(buf)
     }
 }

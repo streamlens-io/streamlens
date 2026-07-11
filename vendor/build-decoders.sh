@@ -7,6 +7,7 @@
 #
 # Requirements: git, make, cmake, a C/C++ toolchain, pkg-config.
 # On x86_64, nasm is required for the FFmpeg assembly.
+# On Windows, run from an MSYS2 MINGW64 shell (mingw-w64-x86_64-toolchain).
 set -euo pipefail
 
 FFMPEG_REPO=https://github.com/FFmpeg/FFmpeg.git
@@ -18,11 +19,15 @@ VENDOR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$VENDOR/src"
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
+sha256() { # macOS ships shasum, MSYS2/Linux sha256sum
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi
+}
+
 # Rebuild only when pins, patches or this script change.
 stamp() {
   { echo "$FFMPEG_COMMIT $LIBDE265_COMMIT"
     cat "$VENDOR"/patches/*/*.patch "$0"
-  } | shasum -a 256 | cut -d' ' -f1
+  } | sha256 | cut -d' ' -f1
 }
 
 fetch() { # fetch <repo> <commit> <dir>
