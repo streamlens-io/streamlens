@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav \
             clang libclang-dev nasm cmake pkg-config ffmpeg
 
       - name: Install system dependencies (macOS)
@@ -87,6 +87,7 @@ jobs:
             mingw-w64-x86_64-gst-plugins-base
             mingw-w64-x86_64-gst-plugins-good
             mingw-w64-x86_64-gst-plugins-bad
+            mingw-w64-x86_64-gst-libav
 
       - name: Cache vendored decoders
         uses: actions/cache@v4

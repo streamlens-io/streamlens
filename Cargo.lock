@@ -4309,6 +4309,7 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-base",
  "gstreamer-video",
+ "libc",
  "log",
  "once_cell",
  "streamlens-types",

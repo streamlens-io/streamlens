@@ -48,8 +48,9 @@ const FFMPEG_LEFT_DC_PRED: i8 = 9;
 const FFMPEG_TOP_DC_PRED: i8 = 10;
 const FFMPEG_DC_128_PRED: i8 = 11;
 
-// AVERROR(EAGAIN): on POSIX, AVERROR(e) = -(e), EAGAIN = 35 on macOS/Linux.
-const AVERROR_EAGAIN_VAL: i32 = -35;
+// AVERROR(EAGAIN) = -EAGAIN, whose value is platform-dependent
+// (11 on Linux/Windows, 35 on macOS/BSD).
+const AVERROR_EAGAIN_VAL: i32 = -libc::EAGAIN;
 // AVERROR_EOF = FFERRTAG('E','O','F',' ') = -(MKTAG('E','O','F',' ')).
 // MKTAG = 'E'|('O'<<8)|('F'<<16)|(' '<<24) = 0x20464F45 = 541478725.
 const AVERROR_EOF_VAL: i32 = -541478725_i32;

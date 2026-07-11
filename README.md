@@ -39,10 +39,10 @@ pkg-config, GStreamer development packages, and nasm on x86_64.
 # macOS
 brew install gstreamer nasm cmake pkg-config
 
-# Debian/Ubuntu
+# Debian/Ubuntu (gstreamer1.0-libav is only needed by the test suite)
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  clang libclang-dev nasm cmake pkg-config
+  gstreamer1.0-libav clang libclang-dev nasm cmake pkg-config
 
 # Windows (MSYS2 MINGW64 shell; MSYS2's Rust targets x86_64-pc-windows-gnu)
 pacman -S git make diffutils mingw-w64-x86_64-{toolchain,cmake,ninja,nasm,pkg-config,clang,rust} \
