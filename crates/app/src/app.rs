@@ -89,6 +89,9 @@ pub struct App {
     index: Option<Arc<StreamIndex>>,
     indexing: Option<(u32, Option<f32>)>,
     file: Option<PathBuf>,
+    /// Window width in logical pixels; the toolbar reflows below a
+    /// breakpoint instead of clipping.
+    window_width: f32,
 
     current: u32,
     frame: Option<Arc<DecodedFrame>>,
@@ -190,6 +193,7 @@ pub enum Message {
     GoEnd,
     PlayPause,
     FastPlay,
+    WindowResized(f32),
     ToggleOrder,
     ToggleQpGraph(bool),
     ToggleBitsSplit(bool),
@@ -257,6 +261,12 @@ impl App {
             index: None,
             indexing: None,
             file: std::env::args().nth(1).map(PathBuf::from),
+            // Matches main.rs's initial window size (resize events only
+            // arrive on change); the STREAMLENS_WINDOW hook overrides both.
+            window_width: std::env::var("STREAMLENS_WINDOW")
+                .ok()
+                .and_then(|v| v.split_once('x')?.0.parse().ok())
+                .unwrap_or(1440.0),
             current: 0,
             frame: None,
             frame_generation: 0,
@@ -338,7 +348,9 @@ impl App {
                 _ => None,
             }
         });
-        Subscription::batch([worker, keys])
+        let resizes =
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width));
+        Subscription::batch([worker, keys, resizes])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -418,6 +430,10 @@ impl App {
                     Playback::Fast => self.stop_play(),
                     _ => self.start_play(true),
                 }
+                Task::none()
+            }
+            Message::WindowResized(width) => {
+                self.window_width = width;
                 Task::none()
             }
             Message::ToggleOrder => {
@@ -1032,22 +1048,44 @@ impl App {
             ));
         }
         let chart_toggles = theme::group(chart_children);
+        let reference = theme::group([theme::flat("Ref…", Message::OpenRefDialog)]);
 
-        row![
-            theme::accent("Open", Message::OpenDialog),
-            transport,
-            zoom,
-            order,
-            color,
-            iced::widget::space::horizontal(),
-            overlays,
-            chart_toggles,
-            theme::group([theme::flat("Ref…", Message::OpenRefDialog)]),
-        ]
-        .spacing(8)
-        .padding(8)
-        .align_y(iced::Alignment::Center)
-        .into()
+        // Everything fits one row on a wide window (overlays right-aligned
+        // via the spacer). Below the breakpoint the spacer would force
+        // clipping, so the groups flow across wrapped rows instead.
+        if self.window_width >= 1180.0 {
+            row![
+                theme::accent("Open", Message::OpenDialog),
+                transport,
+                zoom,
+                order,
+                color,
+                iced::widget::space::horizontal(),
+                overlays,
+                chart_toggles,
+                reference,
+            ]
+            .spacing(8)
+            .padding(8)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            row![
+                theme::accent("Open", Message::OpenDialog),
+                transport,
+                zoom,
+                order,
+                color,
+                overlays,
+                chart_toggles,
+                reference,
+            ]
+            .spacing(8)
+            .padding(8)
+            .align_y(iced::Alignment::Center)
+            .wrap()
+            .into()
+        }
     }
 
     fn chart_strip(&self) -> Element<'_, Message> {
@@ -1213,7 +1251,6 @@ impl App {
                 .text_size(11)
                 .padding([1, 4]),
         );
-        stage_tabs = stage_tabs.push(iced::widget::space::horizontal());
         stage_tabs = stage_tabs.push(theme::chip(
             "Mem",
             self.memory.is_some(),
@@ -1253,7 +1290,7 @@ impl App {
             }
             None => container(text("").size(11)).padding([2, 8]).into(),
         };
-        column![stage_tabs, view, caption].into()
+        column![stage_tabs.wrap(), view, caption].into()
     }
 
     /// Block Info pane: magnified view of the block under the cursor, with

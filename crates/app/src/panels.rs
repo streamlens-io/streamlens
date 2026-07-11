@@ -57,7 +57,9 @@ pub fn tab_bar(active: Tab) -> Element<'static, Message> {
             Message::SelectTab(tab),
         ));
     }
-    container(bar).padding(4).into()
+    // Wrap: a narrow pane flows tabs onto more lines instead of painting
+    // over the neighboring pane.
+    container(bar.wrap()).padding(4).into()
 }
 
 /// Stream Viewer: AU/NAL inventory around the current frame, synced to it.
