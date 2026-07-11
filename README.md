@@ -72,33 +72,6 @@ Development workflow: `just check` runs fmt, clippy and the test suite;
 streams. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design
 and a guided reading order.
 
-## Usage
-
-| Input | Action |
-| --- | --- |
-| `←` / `→` | step a frame (display order); with Shift, decode order |
-| `Space` | play / pause |
-| `Home` / `End` | first / last frame |
-| `+` `−` `0` `1` | zoom in / out / fit / 1:1 |
-| wheel on video | zoom at cursor (middle-drag pans) |
-| click/wheel on chart | seek / zoom the timeline |
-| hover a block | Block Info pane shows a magnified view + everything decoded for it |
-
-Toolbar toggles select overlays (partitions, motion vectors, types, QP
-heat, bit-allocation heat, slice boundaries, on-video values) and chart
-lines (QP, intra/inter/skip bit split, PSNR against a reference YUV).
-Side panels: Info, Stream (NALs), Headers (syntax tree), Stats. Panes
-are draggable and resizable.
-
-## Known limitations
-
-- Reconstruction stages are 8-bit only, and progressive-only for H.264.
-- HEVC per-block bit counts have CTB granularity; CABAC bit counts are
-  approximate by nature (arithmetic coding is fractional-bit).
-- Interlaced H.264 field pairs are modeled as frames.
-- The analysis on screen comes from real decoders, never estimated: if a
-  decoder can't provide a value, the UI says so instead of guessing.
-
 ## License
 
 streamlens is licensed under [MIT](LICENSE-MIT) or
