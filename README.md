@@ -1,4 +1,5 @@
 # StreamLens
+<img width="1728" height="1049" alt="image" src="https://github.com/user-attachments/assets/93413da1-ee36-429a-8707-4606d63c5678" />
 
 StreamLens is an H.264/H.265 bitstream analyzer that lets you inspect how video is actually encoded. It offers per-frame size and type analysis, overlays for blocks such as QP, prediction modes, motion vectors, partitions, and bit allocation, reconstruction views for predicted, unfiltered, and residual data, and exact header trees — all with smooth playback.
 
