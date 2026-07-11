@@ -1,0 +1,21 @@
+[package]
+name = "streamlens"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "streamlens"
+path = "src/main.rs"
+
+[dependencies]
+streamlens-types = { workspace = true }
+streamlens-syntax = { workspace = true }
+streamlens-core = { workspace = true }
+iced = { version = "0.14", features = ["wgpu", "image", "canvas", "tokio", "advanced", "lazy"] }
+rfd = "0.15"
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
