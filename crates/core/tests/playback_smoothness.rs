@@ -21,7 +21,10 @@ fn fixture(name: &str) -> std::path::PathBuf {
 /// timing bounds are loosened there; correctness assertions are not.
 fn assert_smooth(path: &std::path::Path, label: &str) {
     let ci = std::env::var_os("CI").is_some();
-    let (max_gap_ms, fps_factor) = if ci { (400, 0.80) } else { (100, 0.95) };
+    // CI fps bound only catches collapses (the historical cache-thrash bug
+    // halved the rate); shared runners have been observed at 0.79x nominal
+    // on healthy code.
+    let (max_gap_ms, fps_factor) = if ci { (400, 0.60) } else { (100, 0.95) };
 
     let mut session = Session::open(path, |_| {}).unwrap();
     let n = session.index.frames.len();
