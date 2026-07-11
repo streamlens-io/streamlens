@@ -591,6 +591,22 @@ fn build_analysis(img: *const de265_image, width: u32, height: u32, poc: i32) ->
     unsafe {
         de265_internals_get_CTB_sliceIdx(img, ctb_slice.as_mut_ptr());
     }
+    // The internals API reports the slice *segment address* (first CTB of
+    // the slice), not an ordinal — renumber by first appearance in raster
+    // order so "slice 1 of 2" doesn't show up as "slice 6400".
+    {
+        let mut ordinals: Vec<u16> = Vec::new();
+        for s in ctb_slice.iter_mut() {
+            let ord = match ordinals.iter().position(|&v| v == *s) {
+                Some(i) => i as u16,
+                None => {
+                    ordinals.push(*s);
+                    (ordinals.len() - 1) as u16
+                }
+            };
+            *s = ord;
+        }
+    }
 
     // --- Per-CTB bit counts ---
     let mut ctb_bits_raw: Vec<u32> = vec![0u32; ctb_total];

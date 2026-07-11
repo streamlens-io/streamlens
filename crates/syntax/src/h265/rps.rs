@@ -51,6 +51,10 @@ impl Dpb {
         sps_max_dec_pic_buffering: u32,
         log2_max_poc_lsb: u8,
     ) -> [Vec<u32>; 2] {
+        // Index of the picture being processed; bump only after storing it
+        // (incrementing first shifted every stored index by one, so each
+        // frame appeared to reference itself).
+        let di = self.decode_index;
         self.decode_index += 1;
 
         // IDR / BLA clears DPB (8.3.1).
@@ -76,7 +80,6 @@ impl Dpb {
         // Add current picture to DPB as short-term reference.
         // (For sub-layer non-ref _N types, the picture is still stored for
         //  DPB management but won't be referenced across sub-layers.)
-        let di = self.decode_index;
         self.pics.push(Pic {
             decode_index: di,
             poc,
