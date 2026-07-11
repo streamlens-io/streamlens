@@ -225,7 +225,7 @@ impl VideoDecoderImpl for SlH265Dec {
         }
 
         drop(data);
-        self.drain_pictures(false)?;
+        self.drain_pictures()?;
 
         Ok(gst::FlowSuccess::Ok)
     }
@@ -258,7 +258,7 @@ impl VideoDecoderImpl for SlH265Dec {
                 unsafe { de265_flush_data(state.ctx) };
             }
         }
-        self.drain_pictures(true)?;
+        self.drain_pictures()?;
         self.parent_drain()
     }
 
@@ -270,16 +270,20 @@ impl VideoDecoderImpl for SlH265Dec {
                 unsafe { de265_flush_data(state.ctx) };
             }
         }
-        self.drain_pictures(true)?;
+        self.drain_pictures()?;
         self.parent_finish()
     }
 }
 
 impl SlH265Dec {
-    fn drain_pictures(&self, exhaustive: bool) -> Result<gst::FlowSuccess, gst::FlowError> {
+    fn drain_pictures(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
+        // de265_decode advances roughly one NAL per call; multi-slice AUs
+        // (plus AUD) deposit several NALs per input frame. The engine must
+        // run until it reports "waiting for input" (or `more == 0`), or the
+        // undecoded backlog grows by NALs-per-AU minus one every frame and
+        // upstream deadlocks once its feed window is exhausted.
         loop {
-            // Run the decode engine one step.
-            let (more, img_ptr) = {
+            let (err, more, img_ptr) = {
                 let guard = self.state.lock().unwrap();
                 let state = match guard.as_ref() {
                     Some(s) => s,
@@ -287,11 +291,8 @@ impl SlH265Dec {
                 };
                 let mut more = 0i32;
                 let err = unsafe { de265_decode(state.ctx, &mut more) };
-                if err != de265_error_DE265_OK {
-                    gst::warning!(CAT, imp = self, "de265_decode error: {}", err);
-                }
                 let img = unsafe { de265_get_next_picture(state.ctx) };
-                (more, img)
+                (err, more, img)
             };
 
             if !img_ptr.is_null() {
@@ -301,8 +302,11 @@ impl SlH265Dec {
                 continue;
             }
 
-            if more == 0 || !exhaustive {
+            if err == de265_error_DE265_ERROR_WAITING_FOR_INPUT_DATA || more == 0 {
                 break;
+            }
+            if err != de265_error_DE265_OK {
+                gst::warning!(CAT, imp = self, "de265_decode error: {}", err);
             }
         }
         Ok(gst::FlowSuccess::Ok)
