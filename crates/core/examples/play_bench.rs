@@ -31,8 +31,8 @@ fn main() {
 
     let report = |name: &str, s: &streamlens_core::playback::PlayStats| {
         println!(
-            "{name:<14} {:>4} frames  {:>6.2} fps  mean {:>6.2?}  p99 {:>7.2?}  max {:>7.2?}  late {}",
-            s.frames, s.fps, s.mean_gap, s.p99_gap, s.max_gap, s.late
+            "{name:<14} {:>4} frames  {:>6.2} fps  mean {:>6.2?}  p99 {:>7.2?}  max {:>7.2?} @{}  late {}",
+            s.frames, s.fps, s.mean_gap, s.p99_gap, s.max_gap, s.max_gap_at, s.late
         );
     };
 

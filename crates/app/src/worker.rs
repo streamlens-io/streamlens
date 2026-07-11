@@ -152,6 +152,7 @@ impl Worker {
                 Ok(Some(frame)) => Event::Frame(frame),
                 Ok(None) | Err(_) => {
                     self.play = None;
+                    self.set_sweep_paused(false);
                     Event::PlayEnded
                 }
             };
@@ -174,11 +175,16 @@ impl Worker {
             Command::Open(path) => self.open(path),
             Command::Frame(idx) => {
                 self.play = None;
+                self.set_sweep_paused(false);
                 self.prefetch = Some((idx + 1, idx + PREFETCH));
                 self.deliver(idx);
             }
             Command::Play { from_display, fast } => {
                 if let Some(s) = self.session.as_mut() {
+                    // The sweep yields its decode capacity while playing.
+                    if let Some(sweep) = &self.sweep {
+                        sweep.set_paused(true);
+                    }
                     let mut p = Playback::new(s, from_display, fast);
                     // Warm the first stretch so playback starts smooth.
                     p.prebuffer(s);
@@ -186,7 +192,10 @@ impl Worker {
                     self.prefetch = None;
                 }
             }
-            Command::Stop => self.play = None,
+            Command::Stop => {
+                self.play = None;
+                self.set_sweep_paused(false);
+            }
             Command::SetStages { on, refresh } => {
                 if let Some(s) = self.session.as_mut() {
                     s.set_stages(on);
@@ -248,6 +257,12 @@ impl Worker {
                 let _ = tx.unbounded_send(Event::Sweep { done, total, batch });
             },
         ));
+    }
+
+    fn set_sweep_paused(&self, paused: bool) {
+        if let Some(sweep) = &self.sweep {
+            sweep.set_paused(paused);
+        }
     }
 
     /// Decodes and sends one frame (or the error).

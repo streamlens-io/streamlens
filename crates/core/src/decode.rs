@@ -45,7 +45,7 @@ pub struct DecodeService {
 
 /// How many access units past the target we are willing to feed before
 /// waiting for output (covers the decoder's reorder delay).
-const REORDER_AHEAD: u32 = 48;
+pub(crate) const REORDER_AHEAD: u32 = 48;
 
 /// How long the decoder may produce nothing before we give up on the
 /// pipeline. A stalled pipeline never recovers by waiting longer; generous

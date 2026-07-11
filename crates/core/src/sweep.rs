@@ -27,6 +27,7 @@ pub struct SweepFrame {
 /// Runs the sweep on a std::thread. Results arrive in batches via `on_batch`.
 pub struct Sweep {
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 }
 
 impl Sweep {
@@ -42,19 +43,27 @@ impl Sweep {
         on_batch: impl Fn(u32, Vec<(u32, SweepFrame)>) + Send + 'static,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
         let cancel_clone = cancel.clone();
+        let paused_clone = paused.clone();
         std::thread::Builder::new()
             .name("sweep".into())
             .spawn(move || {
-                sweep_thread(path, ref_path, on_batch, cancel_clone);
+                sweep_thread(path, ref_path, on_batch, cancel_clone, paused_clone);
             })
             .expect("spawn sweep thread");
-        Self { cancel }
+        Self { cancel, paused }
     }
 
     /// Signals the thread to stop (best-effort; it checks between frames).
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Pauses/resumes the sweep between frames. The sweep is a background
+    /// job; it must yield the decode capacity to interactive playback.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
     }
 }
 
@@ -69,6 +78,7 @@ fn sweep_thread(
     ref_path: Option<PathBuf>,
     on_batch: impl Fn(u32, Vec<(u32, SweepFrame)>),
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 ) {
     let mut session = match Session::open(&path, |_| {}) {
         Ok(s) => s,
@@ -82,6 +92,9 @@ fn sweep_thread(
     let mut batch: Vec<(u32, SweepFrame)> = Vec::with_capacity(16);
 
     for decode_idx in 0..n {
+        while paused.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         if cancel.load(Ordering::Relaxed) {
             return;
         }

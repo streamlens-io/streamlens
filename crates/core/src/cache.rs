@@ -1,4 +1,11 @@
-//! Byte-budgeted LRU cache of decoded frames, keyed by decode index.
+//! Byte-budgeted cache of decoded frames, keyed by decode index.
+//!
+//! Eviction is by distance from the pivot (the last explicitly requested
+//! frame — the playhead), not LRU. Recency is the wrong signal here: during
+//! playback the just-played frame is the most recently touched while the
+//! prefetched frames ahead of the playhead are the oldest, so LRU evicts
+//! exactly the frames that are about to be displayed and every GOP gets
+//! re-decoded (short-GOP 4K collapsed to ~13 fps this way).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,8 +14,8 @@ use crate::decode::DecodedFrame;
 
 pub struct FrameCache {
     frames: HashMap<u32, Arc<DecodedFrame>>,
-    /// Most-recently-used last.
-    lru: Vec<u32>,
+    /// Decode index of the last explicitly requested frame.
+    pivot: u32,
     budget_bytes: usize,
     used_bytes: usize,
 }
@@ -17,25 +24,37 @@ impl FrameCache {
     pub fn new(budget_bytes: usize) -> Self {
         Self {
             frames: HashMap::new(),
-            lru: Vec::new(),
+            pivot: 0,
             budget_bytes,
             used_bytes: 0,
         }
     }
 
-    pub fn get(&mut self, decode_index: u32) -> Option<Arc<DecodedFrame>> {
-        let frame = self.frames.get(&decode_index).cloned()?;
-        self.touch(decode_index);
-        Some(frame)
+    /// Marks the user-facing position; eviction keeps frames near it.
+    pub fn set_pivot(&mut self, decode_index: u32) {
+        self.pivot = decode_index;
+    }
+
+    pub fn get(&self, decode_index: u32) -> Option<Arc<DecodedFrame>> {
+        self.frames.get(&decode_index).cloned()
     }
 
     pub fn contains(&self, decode_index: u32) -> bool {
         self.frames.contains_key(&decode_index)
     }
 
+    pub fn budget_bytes(&self) -> usize {
+        self.budget_bytes
+    }
+
+    /// Observed mean bytes per resident frame, once there are enough
+    /// frames for the average to mean something.
+    pub fn observed_frame_bytes(&self) -> Option<usize> {
+        (self.frames.len() >= 8).then(|| self.used_bytes / self.frames.len())
+    }
+
     pub fn clear(&mut self) {
         self.frames.clear();
-        self.lru.clear();
         self.used_bytes = 0;
     }
 
@@ -46,19 +65,33 @@ impl FrameCache {
             self.used_bytes -= frame_bytes(&old);
         }
         self.used_bytes += size;
-        self.touch(key);
         self.evict();
     }
 
-    fn touch(&mut self, key: u32) {
-        self.lru.retain(|&k| k != key);
-        self.lru.push(key);
-    }
-
+    /// Evicts the frame farthest from the pivot until within budget.
+    /// Frames behind the pivot weigh 4x their distance: they were already
+    /// shown, while frames ahead are about to be — a prefetched frame only
+    /// loses to a played one when it sits more than 4x farther out.
     fn evict(&mut self) {
-        while self.used_bytes > self.budget_bytes && self.lru.len() > 1 {
-            let oldest = self.lru.remove(0);
-            if let Some(f) = self.frames.remove(&oldest) {
+        while self.used_bytes > self.budget_bytes && self.frames.len() > 1 {
+            let pivot = self.pivot;
+            let weight = |k: u32| {
+                let d = k.abs_diff(pivot) as u64;
+                if k < pivot {
+                    (d * 4, k)
+                } else {
+                    (d, k)
+                }
+            };
+            let Some(&victim) = self
+                .frames
+                .keys()
+                .filter(|&&k| k != pivot)
+                .max_by_key(|&&k| weight(k))
+            else {
+                return;
+            };
+            if let Some(f) = self.frames.remove(&victim) {
                 self.used_bytes -= frame_bytes(&f);
             }
         }
@@ -111,14 +144,28 @@ mod tests {
     }
 
     #[test]
-    fn evicts_least_recently_used() {
+    fn evicts_farthest_from_pivot() {
         let mut cache = FrameCache::new(250);
-        cache.insert(frame(1, 100));
-        cache.insert(frame(2, 100));
-        cache.get(1);
-        cache.insert(frame(3, 100)); // over budget: evicts 2 (LRU), not 1
-        assert!(cache.contains(1));
-        assert!(!cache.contains(2));
-        assert!(cache.contains(3));
+        cache.set_pivot(10);
+        cache.insert(frame(0, 100)); // farthest behind
+        cache.insert(frame(10, 100));
+        cache.insert(frame(11, 100)); // over budget: evicts 0, keeps 10/11
+        assert!(!cache.contains(0));
+        assert!(cache.contains(10));
+        assert!(cache.contains(11));
+    }
+
+    #[test]
+    fn playback_pattern_keeps_upcoming_frames() {
+        // Play forward with a 3-frame budget and prefetch: the frames just
+        // ahead of the pivot must survive, the played ones must go.
+        let mut cache = FrameCache::new(300);
+        for i in 0..10u32 {
+            cache.set_pivot(i);
+            cache.insert(frame(i + 2, 100)); // prefetch ahead
+            if i >= 2 {
+                assert!(cache.contains(i), "due frame {i} was evicted");
+            }
+        }
     }
 }

@@ -134,7 +134,16 @@ impl Playback {
     /// without skipping, one cached frame would stall warm-ahead forever)
     /// and undecodable leading pictures (nothing can ever produce them).
     fn next_warm_target(&mut self, session: &Session) -> Option<u32> {
-        let limit = (self.next_display + AHEAD).min(session.index.frames.len() as u32);
+        // Warm-ahead must stay well under the cache capacity: warming past
+        // it evicts the frames just ahead of the playhead (they are the
+        // LRU-oldest) and every GOP gets decoded again and again.
+        let headroom = crate::decode::REORDER_AHEAD + 16;
+        let ahead = AHEAD.min(
+            (session.cache_capacity_frames() as u32)
+                .saturating_sub(headroom)
+                .max(4),
+        );
+        let limit = (self.next_display + ahead).min(session.index.frames.len() as u32);
         while self.warmed < limit {
             let decode_index = session.index.decode_for_display(self.warmed)?;
             if session.is_cached(decode_index) || session.index.is_undecodable_leading(decode_index)
@@ -176,6 +185,8 @@ pub struct PlayStats {
     pub mean_gap: Duration,
     pub p99_gap: Duration,
     pub max_gap: Duration,
+    /// Frame position (within the measured run) of the worst gap.
+    pub max_gap_at: usize,
     /// Emissions later than 1.5x the frame interval.
     pub late: usize,
 }
@@ -229,6 +240,12 @@ pub fn measure_playback(
             .copied()
             .unwrap_or_default(),
         max_gap: sorted.last().copied().unwrap_or_default(),
+        max_gap_at: gaps
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, g)| **g)
+            .map(|(i, _)| i + 1)
+            .unwrap_or_default(),
         late: gaps.iter().filter(|g| **g > late_threshold).count(),
     })
 }

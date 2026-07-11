@@ -15,10 +15,24 @@ use crate::Error;
 const CACHE_FLOOR: usize = 512 << 20;
 const CACHE_CEILING: usize = 3 << 30;
 
-fn cache_budget(index: &StreamIndex) -> usize {
+/// Frames playback keeps in flight: the warm-ahead window plus the
+/// decoder's reorder burst, with slack. The cache must hold at least this
+/// many frames or the warm-ahead evicts the frames just ahead of the
+/// playhead and every GOP gets re-decoded (short-GOP 4K collapsed to
+/// ~13 fps this way).
+const PLAY_WORKING_SET: usize = 144;
+
+/// Estimated bytes of one cached frame: decoded planes plus roughly half
+/// again for the per-block analysis arenas (matches the exact insert-time
+/// accounting within ~20% on real streams).
+fn estimated_frame_bytes(index: &StreamIndex) -> usize {
     let info = &index.info;
     let bps = if info.bit_depth > 8 { 2 } else { 1 };
-    let frame_bytes = (info.width as usize * info.height as usize * 3 / 2) * bps;
+    let image = (info.width as usize * info.height as usize * 3 / 2) * bps;
+    image * 3 / 2
+}
+
+fn cache_budget(index: &StreamIndex) -> usize {
     let mut max_gop = 0;
     let mut prev = None;
     for f in index.frames.iter().filter(|f| f.is_keyframe) {
@@ -30,10 +44,11 @@ fn cache_budget(index: &StreamIndex) -> usize {
     if max_gop == 0 {
         max_gop = index.frames.len();
     }
-    // Two GOPs plus slack: forward stepping keeps the previous GOP
-    // available for instant backwards steps.
-    frame_bytes
-        .saturating_mul(2 * max_gop + 8)
+    // Two GOPs plus slack (forward stepping keeps the previous GOP for
+    // instant backwards steps), but never below the playback working set.
+    let frames = (2 * max_gop + 8).max(PLAY_WORKING_SET);
+    estimated_frame_bytes(index)
+        .saturating_mul(frames)
         .clamp(CACHE_FLOOR, CACHE_CEILING)
 }
 
@@ -41,7 +56,10 @@ pub struct Session {
     pub index: Arc<StreamIndex>,
     decode: DecodeService,
     cache: FrameCache,
-    /// ES cache handle for byte reads (hex viewer, header re-parses).
+    /// Estimated bytes of one cached frame, used for the capacity hint
+    /// until the cache has observed real frames.
+    est_frame_bytes: usize,
+    /// ES cache handle for byte reads (header re-parses).
     es_file: std::fs::File,
     /// Analyzer with final parameter-set state, for Headers-panel re-parses.
     analyzer: Box<dyn streamlens_syntax::AuAnalyzer>,
@@ -56,10 +74,12 @@ impl Session {
         let decode = DecodeService::new(&index)?;
         let es_file = std::fs::File::open(&index.es_cache_path)?;
         let budget = cache_budget(&index);
+        let est_frame_bytes = estimated_frame_bytes(&index);
         Ok(Self {
             index: Arc::new(index),
             decode,
             cache: FrameCache::new(budget),
+            est_frame_bytes,
             es_file,
             analyzer,
         })
@@ -87,6 +107,9 @@ impl Session {
                 self.index.frames.len()
             )));
         }
+        // Explicit requests define the user position; eviction keeps the
+        // cache centered on it.
+        self.cache.set_pivot(decode_index);
         if let Some(f) = self.cache.get(decode_index) {
             return Ok(f);
         }
@@ -136,6 +159,19 @@ impl Session {
     /// Whether a decoded frame is already cached (no decode needed).
     pub fn is_cached(&self, decode_index: u32) -> bool {
         self.cache.contains(decode_index)
+    }
+
+    /// Number of decoded frames the cache can hold, from the observed
+    /// per-frame size once frames are resident (analysis arenas vary a lot
+    /// by content; an estimate that undershoots would let the playback
+    /// warm-ahead outrun the cache and thrash it).
+    pub fn cache_capacity_frames(&self) -> usize {
+        let per_frame = self
+            .cache
+            .observed_frame_bytes()
+            .unwrap_or(self.est_frame_bytes)
+            .max(1);
+        (self.cache.budget_bytes() / per_frame).max(1)
     }
 
     /// Reads raw bytes from the elementary-stream cache (hex viewer),

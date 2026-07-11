@@ -153,6 +153,60 @@ fn stress_4k60_h264() {
     );
 }
 
+/// 4K30 with one-second GOPs — the camera-capture shape that used to
+/// collapse to ~13 fps: the cache budget (2 GOPs) was smaller than the
+/// playback warm-ahead window and LRU evicted the frames just ahead of
+/// the playhead, re-decoding every GOP.
+#[test]
+#[ignore = "heavy: generates and plays 4K30; run via just bench"]
+fn stress_4k30_short_gop() {
+    let path = std::env::temp_dir().join("streamlens-bench-4k30-g30.mkv");
+    if !path.exists() {
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=3840x2160:rate=30:duration=6",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-g",
+                "30",
+                "-bf",
+                "3",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "matroska",
+            ])
+            .arg(&path)
+            .status()
+            .expect("ffmpeg available");
+        assert!(status.success(), "fixture generation failed");
+    }
+
+    let mut session = Session::open(&path, |_| {}).unwrap();
+    let n = session.index.frames.len();
+
+    let stats = measure_playback(&mut session, 0, false, n).unwrap();
+    eprintln!("4k30-g30 stats: {stats:?}");
+    assert!(
+        stats.fps > 29.0,
+        "4K30 short-GOP playback only {:.2} fps (want ≥29)",
+        stats.fps
+    );
+    assert!(
+        stats.max_gap < Duration::from_millis(250),
+        "4K30 short-GOP max emission gap {:?}",
+        stats.max_gap
+    );
+}
+
 /// 1080p120 must play at full rate with analysis — the bar for typical
 /// high-frame-rate content.
 #[test]
