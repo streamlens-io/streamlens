@@ -264,13 +264,22 @@ where
                 }
             }
 
-            // Selection cursor: full-height line over the selected bar.
+            // Playhead: accent line over the selected bar, with a cap on
+            // top so it reads at a glance.
             if let Some(sel) = self.selected {
+                const ACCENT: [f32; 4] = [0.30, 0.82, 0.88, 1.0];
                 let bar = self.decode_index_to_bar(index, sel);
+                let line_w = (2.0 / bounds.width).max(bar_w * 0.25);
                 bars.push(Bar {
                     pos: [x_of(bar), 0.0],
-                    size: [(1.5 / bounds.width).max(bar_w * 0.25), 1.0],
-                    color: [1.0, 1.0, 1.0, 0.85],
+                    size: [line_w, 1.0],
+                    color: ACCENT,
+                });
+                let cap_w = 7.0 / bounds.width;
+                bars.push(Bar {
+                    pos: [x_of(bar) - (cap_w - line_w) / 2.0, 0.0],
+                    size: [cap_w, 0.05],
+                    color: ACCENT,
                 });
             }
         }

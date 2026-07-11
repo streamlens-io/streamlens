@@ -99,3 +99,70 @@ pub fn chip<'a, M: Clone + 'a>(label: &'a str, active: bool, msg: M) -> Element<
     }
     b.on_press(msg).into()
 }
+
+/// Flat toolbar button: no chrome until hovered. Lives inside a [`group`]
+/// so the group provides the visual boundary, not the button.
+pub fn flat<'a, M: Clone + 'a>(label: &'a str, msg: M) -> Element<'a, M> {
+    button(text(label).size(12))
+        .padding([4, 8])
+        .style(|theme: &Theme, status| flat_style(theme, status, false))
+        .on_press(msg)
+        .into()
+}
+
+/// Segmented option / latch: raised neutral fill when active, flat
+/// otherwise (Display|Decode, the play button while playing).
+pub fn segment<'a, M: Clone + 'a>(label: &'a str, active: bool, msg: M) -> Element<'a, M> {
+    button(text(label).size(12))
+        .padding([4, 8])
+        .style(move |theme: &Theme, status| flat_style(theme, status, active))
+        .on_press(msg)
+        .into()
+}
+
+fn flat_style(theme: &Theme, status: button::Status, active: bool) -> button::Style {
+    let palette = theme.extended_palette();
+    let hovered = matches!(status, button::Status::Hovered);
+    button::Style {
+        background: (active || hovered)
+            .then_some(iced::Background::Color(palette.background.strong.color)),
+        text_color: if active {
+            palette.background.base.text
+        } else {
+            Color {
+                a: 0.8,
+                ..palette.background.base.text
+            }
+        },
+        border: iced::Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Accent-filled call to action (the Open button).
+pub fn accent<'a, M: Clone + 'a>(label: &'a str, msg: M) -> Element<'a, M> {
+    button(text(label).size(13))
+        .padding([5, 14])
+        .style(|theme: &Theme, status| {
+            let palette = theme.extended_palette();
+            let base = if matches!(status, button::Status::Hovered) {
+                palette.primary.strong
+            } else {
+                palette.primary.base
+            };
+            button::Style {
+                background: Some(iced::Background::Color(base.color)),
+                text_color: base.text,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .on_press(msg)
+        .into()
+}

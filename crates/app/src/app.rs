@@ -935,42 +935,26 @@ impl App {
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
-        let tool = |label: &'static str, msg: Message| {
-            button(text(label).size(13))
-                .padding([3, 8])
-                .style(button::secondary)
-                .on_press(msg)
-        };
         let playing = self.playback == Playback::Playing;
         let fast = self.playback == Playback::Fast;
 
+        // Glyphs chosen from blocks without emoji variants — U+23EE-style
+        // media symbols render as color emoji on macOS regardless of FE0E.
         let transport = theme::group([
-            tool("⏮", Message::GoStart).into(),
-            tool("◀", Message::Step(-1)).into(),
-            button(text(if playing { "⏸" } else { "▶" }).size(13))
-                .padding([3, 8])
-                .style(if playing {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::PlayPause)
-                .into(),
-            tool("▶│", Message::Step(1)).into(),
-            tool("⏭", Message::GoEnd).into(),
-            button(text("▶▶").size(13))
-                .padding([3, 8])
-                .style(if fast {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::FastPlay)
-                .into(),
+            theme::flat("│◀◀", Message::GoStart),
+            theme::flat("◀", Message::Step(-1)),
+            theme::segment(
+                if playing { "▮▮" } else { "▶" },
+                playing,
+                Message::PlayPause,
+            ),
+            theme::flat("▶│", Message::Step(1)),
+            theme::flat("▶▶│", Message::GoEnd),
+            theme::segment("Fast", fast, Message::FastPlay),
         ]);
 
         let zoom = theme::group([
-            tool("−", Message::ZoomOut).into(),
+            theme::flat("−", Message::ZoomOut),
             button(
                 text(match self.zoom {
                     Zoom::Fit => format!("Fit {:.0}%", self.effective_zoom * 100.0),
@@ -979,21 +963,21 @@ impl App {
                 .size(12)
                 .font(iced::Font::MONOSPACE),
             )
-            .padding([3, 6])
-            .style(button::secondary)
+            .padding([4, 6])
+            .style(button::text)
             .on_press(Message::ZoomFit)
             .into(),
-            tool("+", Message::ZoomIn).into(),
-            tool("1:1", Message::ZoomActual).into(),
+            theme::flat("+", Message::ZoomIn),
+            theme::flat("1:1", Message::ZoomActual),
         ]);
 
         let order = theme::group([
-            theme::chip(
+            theme::segment(
                 "Display",
                 self.order == ChartOrder::Display,
                 Message::ToggleOrder,
             ),
-            theme::chip(
+            theme::segment(
                 "Decode",
                 self.order == ChartOrder::Decode,
                 Message::ToggleOrder,
@@ -1001,8 +985,8 @@ impl App {
         ]);
 
         let color = theme::group([
-            tool(channel_label(self.channel), Message::CycleChannel).into(),
-            tool(matrix_label(self.matrix), Message::CycleMatrix).into(),
+            theme::flat(channel_label(self.channel), Message::CycleChannel),
+            theme::flat(matrix_label(self.matrix), Message::CycleMatrix),
         ]);
 
         let overlay =
@@ -1050,7 +1034,7 @@ impl App {
         let chart_toggles = theme::group(chart_children);
 
         row![
-            tool("Open", Message::OpenDialog),
+            theme::accent("Open", Message::OpenDialog),
             transport,
             zoom,
             order,
@@ -1058,12 +1042,11 @@ impl App {
             iced::widget::space::horizontal(),
             overlays,
             chart_toggles,
-            tool("Ref…", Message::OpenRefDialog),
+            theme::group([theme::flat("Ref…", Message::OpenRefDialog)]),
         ]
-        .spacing(6)
-        .padding(6)
+        .spacing(8)
+        .padding(8)
         .align_y(iced::Alignment::Center)
-        .wrap()
         .into()
     }
 
