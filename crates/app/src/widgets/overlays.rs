@@ -206,8 +206,6 @@ fn push_arrow(cx: f32, cy: f32, mv: MotionVector, w: f32, color: [f32; 4], out: 
     let dx = mv.x as f32 / 4.0;
     let dy = mv.y as f32 / 4.0;
     if dx == 0.0 && dy == 0.0 {
-        // Zero MV: draw a dot.
-        out.push(Segment::line(cx - w, cy, cx + w, cy, 2.0 * w, color));
         return;
     }
     let (tx, ty) = (cx + dx, cy + dy);
