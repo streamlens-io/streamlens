@@ -11,8 +11,6 @@ const ICON: &[u8] = include_bytes!("../../../assets/icon-256.png");
 
 fn main() -> iced::Result {
     env_logger::init();
-    #[cfg(target_os = "macos")]
-    set_dock_icon();
     // Debug/testing hook: STREAMLENS_WINDOW=WxH overrides the initial size.
     let size = std::env::var("STREAMLENS_WINDOW")
         .ok()
@@ -36,9 +34,10 @@ fn main() -> iced::Result {
 
 /// macOS takes the dock icon from the .app bundle, and a bare binary gets
 /// the generic executable icon — set it on the shared NSApplication
-/// instead (winit reuses the same instance).
+/// instead. Called from the first `update` (see there for why not before
+/// `run()`); the Dock *name* still needs the bundle (`just bundle`).
 #[cfg(target_os = "macos")]
-fn set_dock_icon() {
+pub(crate) fn set_dock_icon() {
     use objc2::{AllocAnyThread, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;

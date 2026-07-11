@@ -59,6 +59,9 @@ pacman -S git make diffutils mingw-w64-x86_64-{toolchain,cmake,ninja,nasm,pkg-co
 cargo run --release -p streamlens -- video.mp4
 ```
 
+On macOS, `just bundle` assembles `target/StreamLens.app` (proper Dock
+name and icon).
+
 The script downloads FFmpeg and libde265 at pinned commits, applies the
 patches from `vendor/patches/` (which add per-block analysis export), and
 installs static libraries into `vendor/`. Nothing is installed

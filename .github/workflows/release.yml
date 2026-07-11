@@ -62,6 +62,10 @@ jobs:
       - name: Build
         run: cargo build --release -p streamlens
 
+      - name: Bundle StreamLens.app (macOS)
+        if: runner.os == 'macOS'
+        run: ./packaging/macos-app.sh
+
       - name: Package
         run: |
           name="streamlens-${GITHUB_REF_NAME}-${{ matrix.target }}"
@@ -69,6 +73,7 @@ jobs:
           cp target/release/streamlens README.md \
             LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md "$name/"
           cp -R licenses "$name/licenses"
+          [ -d target/StreamLens.app ] && cp -R target/StreamLens.app "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 

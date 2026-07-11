@@ -343,6 +343,13 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Set once the run loop is live: applied before the app finishes
+        // launching, the icon is clobbered when the Dock tile appears.
+        #[cfg(target_os = "macos")]
+        {
+            static DOCK_ICON: std::sync::Once = std::sync::Once::new();
+            DOCK_ICON.call_once(crate::set_dock_icon);
+        }
         match message {
             Message::Worker(event) => self.on_worker(event),
             Message::OpenDialog => Task::perform(

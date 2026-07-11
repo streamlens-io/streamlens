@@ -15,6 +15,11 @@ fixtures:
 vendor:
     ./vendor/build-decoders.sh
 
+# Assemble target/StreamLens.app (macOS Dock name + icon).
+bundle:
+    cargo build --release -p streamlens
+    ./packaging/macos-app.sh
+
 run *ARGS:
     cargo run -p streamlens -- {{ARGS}}
 
