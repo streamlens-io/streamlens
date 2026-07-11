@@ -1,0 +1,14 @@
+/target
+*.log
+.DS_Store
+/fixtures/tmp/
+/vendor/ffmpeg-prefix/
+/vendor/libde265-prefix/
+# Compiled smoke-test binaries (sources are tracked).
+vendor/smoke/ffmpeg_h264_analysis
+vendor/smoke/de265_internals_smoke
+vendor/smoke/ffmpeg_h264_perf
+vendor/smoke/ffmpeg_h264_thread_diag
+vendor/smoke/ffmpeg_h264_thread_diff
+/vendor/src/
+/vendor/.stamp

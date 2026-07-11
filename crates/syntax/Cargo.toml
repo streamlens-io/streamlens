@@ -1,0 +1,10 @@
+[package]
+name = "streamlens-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+streamlens-types = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
