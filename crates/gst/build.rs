@@ -9,6 +9,13 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let vendor = manifest.join("../../vendor");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    // cfg!() in a build script reflects the host, not the target.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    // On windows-gnu, MSYS2's libclang disagrees with rustc about the
+    // layout of FFmpeg structs the bindings never touch (AVHWAccel,
+    // AVOption, …), failing the generated compile-time asserts. The decode
+    // smoke tests cover real ABI breakage in the structs we do use.
+    let layout_tests = target_os != "windows";
 
     let de265 = vendor.join("libde265-prefix");
     let ffmpeg = vendor.join("ffmpeg-prefix");
@@ -53,6 +60,7 @@ fn main() {
         .allowlist_function("de265_.*")
         .allowlist_type("de265_.*")
         .allowlist_var("DE265_.*")
+        .layout_tests(layout_tests)
         .derive_default(true)
         .generate()
         .expect("bindgen libde265")
@@ -74,6 +82,7 @@ fn main() {
         )
         .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID")
         .allowlist_var("AV_.*|FF_.*|SL_H264.*")
+        .layout_tests(layout_tests)
         .derive_default(true)
         .generate()
         .expect("bindgen ffmpeg")
@@ -92,8 +101,6 @@ fn main() {
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
 
-    // cfg!() in a build script reflects the host, not the target.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     match target_os.as_str() {
         // libde265 is C++: libc++ on macOS, libstdc++ elsewhere.
         "macos" => {
