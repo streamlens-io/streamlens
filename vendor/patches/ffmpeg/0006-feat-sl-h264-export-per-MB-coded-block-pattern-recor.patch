@@ -1,0 +1,90 @@
+From cf3d18ffb16f131f8428916a9785b21cde680a62 Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 23:54:51 +0200
+Subject: [PATCH 6/6] feat(sl-h264): export per-MB coded block pattern (record
+ v3)
+
+Repurposes a pad byte in SLH264MBRecord for the standard CBP (luma
+quadrant bits 0-3, chroma bits 4-5) so consumers can tell which
+transform blocks actually carry residual. Gated on IS_SKIP because
+CAVLC skip MBs never write cbp_table.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libavcodec/h264_mb.c         |  8 ++++++--
+ libavcodec/h264dec.c         |  3 ++-
+ libavutil/sl_h264_analysis.h | 12 +++++++++---
+ 3 files changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
+index 46b281009f..6051258778 100644
+--- a/libavcodec/h264_mb.c
++++ b/libavcodec/h264_mb.c
+@@ -878,7 +878,11 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
+             }
+         }
+ 
+-        r->_pad[0] = r->_pad[1] = 0;
+-        r->bits    = sl->sl_analysis_mb_bits;
++        /* cbp_table holds the standard CBP in its low 6 bits for every
++         * coded MB (both entropy coders); CAVLC skip MBs never write it,
++         * so gate on mb_type instead of trusting a possibly-stale entry. */
++        r->cbp  = IS_SKIP(mb_type) ? 0 : (uint8_t)(h->cbp_table[mb_xy] & 0x3f);
++        r->_pad = 0;
++        r->bits = sl->sl_analysis_mb_bits;
+     }
+ }
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index 893aa1b5f5..a88dc3dc37 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -905,7 +905,8 @@ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
+         recs[i].qp                    = 0;
+         recs[i].slice_id              = 0xFFFF;
+         recs[i].mb_type               = 0;
+-        recs[i]._pad[0] = recs[i]._pad[1] = 0;
++        recs[i].cbp  = 0;
++        recs[i]._pad = 0;
+         memset(recs[i].sub_mb_type, 0, sizeof(recs[i].sub_mb_type));
+         memset(recs[i].mv,          0, sizeof(recs[i].mv));
+         memset(recs[i].ref_idx,    -1, sizeof(recs[i].ref_idx));
+diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
+index b3e3ad2c62..541d9ceb60 100644
+--- a/libavutil/sl_h264_analysis.h
++++ b/libavutil/sl_h264_analysis.h
+@@ -45,7 +45,7 @@
+ 
+ #include <stdint.h>
+ 
+-#define SL_H264_ANALYSIS_VERSION 2
++#define SL_H264_ANALYSIS_VERSION 3
+ 
+ /**
+  * Header placed at the start of the AV_FRAME_DATA_SL_H264_ANALYSIS blob.
+@@ -112,6 +112,11 @@ typedef struct SLH264AnalysisHeader {
+  *   CABAC: bytestream pointer delta in bytes × 8 (byte granularity).
+  *   CAVLC: get_bits_count delta around ff_h264_decode_mb_cavlc.
+  *   0 for skip MBs or if measurement is unavailable.
++ *
++ * cbp (since version 3):
++ *   Standard coded block pattern. Bits 0-3: luma 8x8 quadrants in raster
++ *   order (bit set = quadrant has coded residual). Bits 4-5: chroma
++ *   (0 = none, 1 = DC only, 2 = DC + AC). 0 for skip MBs.
+  */
+ typedef struct SLH264MBRecord {
+     uint32_t mb_type;
+@@ -124,8 +129,9 @@ typedef struct SLH264MBRecord {
+     uint8_t  transform_8x8;
+     int8_t   qp;
+     uint16_t slice_id;
+-    uint8_t  _pad[2]; /**< explicit zero padding; keeps struct size a multiple of 4 */
+-    uint32_t bits;    /**< approximate coded bits consumed by this MB (entropy-coder position delta) */
++    uint8_t  cbp;  /**< coded block pattern: luma quadrants bits 0-3, chroma bits 4-5 */
++    uint8_t  _pad; /**< explicit zero padding; keeps struct size a multiple of 4 */
++    uint32_t bits; /**< approximate coded bits consumed by this MB (entropy-coder position delta) */
+ } __attribute__((packed)) SLH264MBRecord;
+ 
+ /**
+-- 
+2.39.5 (Apple Git-154)
+

@@ -1,0 +1,172 @@
+From 92f3793502ea6c9bd520f9fe34c46aa9abf65c8b Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 10:57:15 +0200
+Subject: [PATCH 2/6] feat: add per-MB bit count to SLH264MBRecord (version 2)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bump SL_H264_ANALYSIS_VERSION to 2 and add `uint32_t bits` to
+SLH264MBRecord (struct grows from 180 → 184 bytes; _pad[2] retained as
+explicit zero padding before the new field at offset 180).
+
+Measurement:
+- CABAC: `(bytestream_offset*8) - av_log2(low>>1)` delta around
+  ff_h264_decode_mb_cabac.  The low register gives ~1-bit precision;
+  highly predictable MBs may measure 0.  Position stored in
+  H264SliceContext.sl_analysis_mb_bits and written in ff_h264_hl_decode_mb.
+- CAVLC: get_bits_count delta around ff_h264_decode_mb_cavlc.
+
+MBAFF paths instrument both the top and bottom-field calls independently.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libavcodec/h264_mb.c         |  1 +
+ libavcodec/h264_slice.c      | 39 ++++++++++++++++++++++++++++++++----
+ libavcodec/h264dec.h         |  3 +++
+ libavutil/sl_h264_analysis.h | 12 +++++++++--
+ 4 files changed, 49 insertions(+), 6 deletions(-)
+
+diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
+index 55f9d71a3e..78ca23289b 100644
+--- a/libavcodec/h264_mb.c
++++ b/libavcodec/h264_mb.c
+@@ -867,5 +867,6 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
+         }
+ 
+         r->_pad[0] = r->_pad[1] = 0;
++        r->bits    = sl->sl_analysis_mb_bits;
+     }
+ }
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index 71d5700b23..c370b2c1c8 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -2621,7 +2621,20 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+                 return AVERROR_INVALIDDATA;
+             }
+ 
+-            ret = ff_h264_decode_mb_cabac(h, sl);
++            {
++                /* CABAC bit position: bytes_read*8 - log2(low>>1).
++                 * low>>1 (sentinel removed) represents bits buffered from stream;
++                 * as log2 decreases, consumed bits increase. Delta gives per-MB bits. */
++                int pos_before = (int)(sl->cabac.bytestream - sl->cabac.bytestream_start) * 8
++                                 - av_log2(sl->cabac.low >> 1);
++                ret = ff_h264_decode_mb_cabac(h, sl);
++                {
++                    int pos_after = (int)(sl->cabac.bytestream - sl->cabac.bytestream_start) * 8
++                                    - av_log2(sl->cabac.low >> 1);
++                    int delta = pos_after - pos_before;
++                    sl->sl_analysis_mb_bits = delta > 0 ? (unsigned)delta : 0;
++                }
++            }
+ 
+             if (ret >= 0)
+                 ff_h264_hl_decode_mb(h, sl);
+@@ -2630,7 +2643,17 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+             if (ret >= 0 && FRAME_MBAFF(h)) {
+                 sl->mb_y++;
+ 
+-                ret = ff_h264_decode_mb_cabac(h, sl);
++                {
++                    int pos_before = (int)(sl->cabac.bytestream - sl->cabac.bytestream_start) * 8
++                                     - av_log2(sl->cabac.low >> 1);
++                    ret = ff_h264_decode_mb_cabac(h, sl);
++                    {
++                        int pos_after = (int)(sl->cabac.bytestream - sl->cabac.bytestream_start) * 8
++                                        - av_log2(sl->cabac.low >> 1);
++                        int delta = pos_after - pos_before;
++                        sl->sl_analysis_mb_bits = delta > 0 ? (unsigned)delta : 0;
++                    }
++                }
+ 
+                 if (ret >= 0)
+                     ff_h264_hl_decode_mb(h, sl);
+@@ -2692,7 +2715,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+                 return AVERROR_INVALIDDATA;
+             }
+ 
+-            ret = ff_h264_decode_mb_cavlc(h, sl);
++            {
++                int cavlc_before = get_bits_count(&sl->gb);
++                ret = ff_h264_decode_mb_cavlc(h, sl);
++                sl->sl_analysis_mb_bits = (unsigned)(get_bits_count(&sl->gb) - cavlc_before);
++            }
+ 
+             if (ret >= 0)
+                 ff_h264_hl_decode_mb(h, sl);
+@@ -2700,7 +2727,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+             if (ret >= 0 && FRAME_MBAFF(h)) {
+                 sl->mb_y++;
+-                ret = ff_h264_decode_mb_cavlc(h, sl);
++                {
++                    int cavlc_before = get_bits_count(&sl->gb);
++                    ret = ff_h264_decode_mb_cavlc(h, sl);
++                    sl->sl_analysis_mb_bits = (unsigned)(get_bits_count(&sl->gb) - cavlc_before);
++                }
+ 
+                 if (ret >= 0)
+                     ff_h264_hl_decode_mb(h, sl);
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index b09d42367b..475b2b8bab 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -333,6 +333,9 @@ typedef struct H264SliceContext {
+     int delta_poc[2];
+     int curr_pic_num;
+     int max_pic_num;
++
++    /** Streamlens: coded bits consumed by the most recently parsed MB (entropy-coder delta). */
++    unsigned sl_analysis_mb_bits;
+ } H264SliceContext;
+ 
+ /**
+diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
+index 816990dc1c..ed9a4b1807 100644
+--- a/libavutil/sl_h264_analysis.h
++++ b/libavutil/sl_h264_analysis.h
+@@ -38,6 +38,7 @@
+  *
+  * Version history:
+  *   1 — initial layout
++ *   2 — added SLH264MBRecord.bits (approximate coded bits for this MB)
+  */
+ 
+ #ifndef AVUTIL_SL_H264_ANALYSIS_H
+@@ -45,7 +46,7 @@
+ 
+ #include <stdint.h>
+ 
+-#define SL_H264_ANALYSIS_VERSION 1
++#define SL_H264_ANALYSIS_VERSION 2
+ 
+ /**
+  * Header placed at the start of the AV_FRAME_DATA_SL_H264_ANALYSIS blob.
+@@ -106,6 +107,12 @@ typedef struct SLH264AnalysisHeader {
+  *
+  * slice_id:
+  *   Slice index for this MB (from h->slice_table), or 0xFFFF if unknown.
++ *
++ * bits:
++ *   Approximate coded bits consumed by this MB (entropy-coder position delta).
++ *   CABAC: bytestream pointer delta in bytes × 8 (byte granularity).
++ *   CAVLC: get_bits_count delta around ff_h264_decode_mb_cavlc.
++ *   0 for skip MBs or if measurement is unavailable.
+  */
+ typedef struct SLH264MBRecord {
+     uint32_t mb_type;
+@@ -118,7 +125,8 @@ typedef struct SLH264MBRecord {
+     uint8_t  transform_8x8;
+     int8_t   qp;
+     uint16_t slice_id;
+-    uint8_t  _pad[2];
++    uint8_t  _pad[2]; /**< explicit zero padding; keeps struct size a multiple of 4 */
++    uint32_t bits;    /**< approximate coded bits consumed by this MB (entropy-coder position delta) */
+ } __attribute__((packed)) SLH264MBRecord;
+ 
+ #endif /* AVUTIL_SL_H264_ANALYSIS_H */
+-- 
+2.39.5 (Apple Git-154)
+

@@ -1,0 +1,24 @@
+[package]
+name = "streamlens-gst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+streamlens-types = { workspace = true }
+gstreamer = { workspace = true }
+gstreamer-video = { workspace = true }
+gstreamer-base = { workspace = true }
+log = { workspace = true }
+once_cell = { workspace = true }
+
+[build-dependencies]
+bindgen = "0.71"
+
+[dev-dependencies]
+gstreamer-app = { workspace = true }
+
+[lib]
+crate-type = ["lib", "cdylib"]
+# bindgen-generated doc comments are not valid doctests
+doctest = false

@@ -1,0 +1,462 @@
+From 9d8660d3f67a559c2772edce82e3b7ef28275207 Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Mon, 6 Jul 2026 22:37:44 +0200
+Subject: [PATCH 1/6] feat: export per-macroblock H.264 analysis as AVFrame
+ side data
+
+Adds AV_FRAME_DATA_SL_H264_ANALYSIS: a packed blob of per-MB records
+attached to every decoded AVFrame when the h264 decoder option
+"export_sl_analysis" is set to 1.
+
+Layout (libavutil/sl_h264_analysis.h):
+  SLH264AnalysisHeader   (version=1, mb_width, mb_height, mb_stride)
+  SLH264MBRecord[mb_width * mb_height]  (raster order, row-major)
+
+Per-MB record fields:
+  mb_type        - raw FFmpeg MB_TYPE_* flags (mpegutils.h semantics)
+  sub_mb_type[4] - sub-MB partition types per 8x8 block
+  mv[2][16][2]   - quarter-pel MVs per list per 4x4 block (b_stride layout)
+  ref_idx[2][4]  - reference index per list per 8x8 partition, -1=unused
+  intra4x4_pred_modes[16] - scan4 order; FFmpeg internal modes 0-11
+                            (0-8 standard H.264, 9-11 DC edge variants);
+                            0x7F when not an INTRA4x4 MB
+  chroma_pred_mode    - FFmpeg 8x8 chroma pred mode (0-3 standard, 4-9
+                        internal DC edge variants); 0xFF for inter MBs
+  intra16x16_pred_mode - same scale as chroma; 0xFF when not INTRA16x16
+  transform_8x8  - 1 if MB_TYPE_8x8DCT
+  qp             - luma quantization parameter for this MB
+  slice_id       - h->slice_table[mb_xy], or 0xFFFF if unavailable
+
+Implementation notes:
+- Side data blob is allocated on pic->f at frame start (h264_frame_start)
+  and filled per-MB in ff_h264_hl_decode_mb immediately after entropy
+  decoding. It travels with the picture through the DPB, so B-frame
+  display reordering is transparent.
+- Intra prediction modes are captured from sl->intra4x4_pred_mode_cache
+  (post write_back, post check_intra4x4_pred_mode), giving the actual
+  modes used for reconstruction including FFmpeg's edge-case DC variants.
+- Chroma/16x16 modes from sl->chroma_pred_mode / sl->intra16x16_pred_mode.
+- MVs and ref indices from h->cur_pic.motion_val / h->cur_pic.ref_index,
+  populated by write_back_motion before ff_h264_hl_decode_mb is called.
+- Sub-MB types from sl->sub_mb_type (uint16_t[4], widened to uint32_t).
+- REQUIRES threads=1. Frame threading is incompatible; set
+  avctx->thread_count = 1 before avcodec_open2.
+- AV_FRAME_DATA_SL_H264_ANALYSIS appended at end of AVFrameSideDataType
+  enum (additive; ABI drift vs system ffmpeg acceptable for vendored build).
+
+Fields omitted (would require deep surgery):
+- cbp: available in h->cbp_table but not per-picture persistent; deferred.
+- Per-MB bit counts: explicitly out of scope (phase 2).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libavcodec/h264_mb.c         |  53 +++++++++++++++
+ libavcodec/h264_slice.c      |   8 +++
+ libavcodec/h264dec.c         |  64 ++++++++++++++++++
+ libavcodec/h264dec.h         |  17 +++++
+ libavutil/Makefile           |   3 +-
+ libavutil/frame.h            |  10 +++
+ libavutil/side_data.c        |   1 +
+ libavutil/sl_h264_analysis.h | 124 +++++++++++++++++++++++++++++++++++
+ 8 files changed, 279 insertions(+), 1 deletion(-)
+ create mode 100644 libavutil/sl_h264_analysis.h
+
+diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
+index 0d6562b583..55f9d71a3e 100644
+--- a/libavcodec/h264_mb.c
++++ b/libavcodec/h264_mb.c
+@@ -815,4 +815,57 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
+         hl_decode_mb_simple_16(h, sl);
+     } else
+         hl_decode_mb_simple_8(h, sl);
++
++    /* Streamlens: fill per-MB analysis record */
++    if (h->sl_analysis_recs) {
++        /*
++         * sl_analysis_recs is indexed in raster order: sl->mb_y * h->mb_width + sl->mb_x.
++         * This is a compact layout (no stride padding) matching the blob header's
++         * mb_width/mb_height fields and what consumers iterate over.
++         * The other FFmpeg arrays (qscale_table, ref_index, motion_val) are still
++         * indexed by mb_xy (stride-based).
++         * b8_xy: index into ref_index[] (4 8x8 blocks per MB, 2x2 layout).
++         * b_xy:  base 4x4-block index into motion_val[] (b_stride = mb_width*4).
++         */
++        const int raster_idx = sl->mb_y * h->mb_width + sl->mb_x;
++        SLH264MBRecord *r    = (SLH264MBRecord *)h->sl_analysis_recs + raster_idx;
++        const int b8_xy      = 4 * mb_xy;
++        const int b_stride   = h->b_stride;
++        const int b_xy       = 4 * sl->mb_x + 4 * sl->mb_y * b_stride;
++
++        r->mb_type       = (uint32_t)mb_type;
++        r->qp            = h->cur_pic.qscale_table[mb_xy];
++        r->slice_id      = h->slice_table ? h->slice_table[mb_xy] : 0xFFFF;
++        r->transform_8x8 = IS_8x8DCT(mb_type) ? 1 : 0;
++
++        if (IS_INTRA4x4(mb_type)) {
++            for (int i = 0; i < 16; i++)
++                r->intra4x4_pred_modes[i] = sl->intra4x4_pred_mode_cache[scan8[i]];
++        } else {
++            memset(r->intra4x4_pred_modes, 0x7F, 16);
++        }
++        r->chroma_pred_mode     = IS_INTRA(mb_type)
++                                  ? (uint8_t)sl->chroma_pred_mode : 0xFF;
++        r->intra16x16_pred_mode = IS_INTRA16x16(mb_type)
++                                  ? (uint8_t)sl->intra16x16_pred_mode : 0xFF;
++
++        for (int i = 0; i < 4; i++)
++            r->sub_mb_type[i] = sl->sub_mb_type[i];
++
++        for (int list = 0; list < 2; list++) {
++            for (int part = 0; part < 4; part++)
++                r->ref_idx[list][part] = h->cur_pic.ref_index[list][b8_xy + part];
++            for (int row = 0; row < 4; row++) {
++                for (int col = 0; col < 4; col++) {
++                    const int blk          = row * 4 + col;
++                    const int16_t (*mv)[2] =
++                        &h->cur_pic.motion_val[list][b_xy + row * b_stride + col];
++                    r->mv[list][blk][0] = (*mv)[0];
++                    r->mv[list][blk][1] = (*mv)[1];
++                }
++            }
++        }
++
++        r->_pad[0] = r->_pad[1] = 0;
++    }
+ }
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index 7e53e38cca..71d5700b23 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -530,6 +530,14 @@ static int h264_frame_start(H264Context *h)
+     if ((ret = alloc_picture(h, pic)) < 0)
+         return ret;
+ 
++    if (h->export_sl_analysis) {
++        ret = ff_h264_sl_analysis_alloc(h, pic);
++        if (ret < 0)
++            return ret;
++    } else {
++        h->sl_analysis_recs = NULL;
++    }
++
+     h->cur_pic_ptr = pic;
+     ff_h264_unref_picture(&h->cur_pic);
+     if (CONFIG_ERROR_RESILIENCE) {
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index ab31832308..24125e8025 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -157,6 +157,8 @@ void ff_h264_free_tables(H264Context *h)
+     av_freep(&h->mb2b_xy);
+     av_freep(&h->mb2br_xy);
+ 
++    h->sl_analysis_recs = NULL;
++
+     av_refstruct_pool_uninit(&h->qscale_table_pool);
+     av_refstruct_pool_uninit(&h->mb_type_pool);
+     av_refstruct_pool_uninit(&h->motion_val_pool);
+@@ -858,6 +860,63 @@ static int h264_export_enc_params(AVFrame *f, const H264Picture *p)
+     return 0;
+ }
+ 
++/**
++ * Allocate the AV_FRAME_DATA_SL_H264_ANALYSIS blob on pic->f and set
++ * h->sl_analysis_recs to point at the per-MB records array.
++ * Called from h264_frame_start() in h264_slice.c when export_sl_analysis is set.
++ * The side data travels with the picture through the DPB, so display-order
++ * reordering is transparent.  Requires threads=1 (caller's responsibility).
++ */
++int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
++{
++    const unsigned int nb_mb = pic->mb_height * pic->mb_width;
++    const size_t blob_size   = sizeof(SLH264AnalysisHeader) +
++                               (size_t)nb_mb * sizeof(SLH264MBRecord);
++    AVFrameSideData *sd;
++    SLH264AnalysisHeader *hdr;
++    SLH264MBRecord *recs;
++
++    sd = av_frame_new_side_data(pic->f, AV_FRAME_DATA_SL_H264_ANALYSIS, blob_size);
++    if (!sd) {
++        h->sl_analysis_recs = NULL;
++        return AVERROR(ENOMEM);
++    }
++
++    hdr            = (SLH264AnalysisHeader *)sd->data;
++    hdr->version   = SL_H264_ANALYSIS_VERSION;
++    hdr->mb_width  = pic->mb_width;
++    hdr->mb_height = pic->mb_height;
++    hdr->mb_stride = pic->mb_stride;
++
++    recs = (SLH264MBRecord *)(sd->data + sizeof(SLH264AnalysisHeader));
++
++    /* Pre-fill sentinel values; ff_h264_hl_decode_mb fills real data per-MB. */
++    for (unsigned int i = 0; i < nb_mb; i++) {
++        memset(recs[i].intra4x4_pred_modes, 0x7F, 16);
++        recs[i].chroma_pred_mode      = 0xFF;
++        recs[i].intra16x16_pred_mode  = 0xFF;
++        recs[i].transform_8x8         = 0;
++        recs[i].qp                    = 0;
++        recs[i].slice_id              = 0xFFFF;
++        recs[i].mb_type               = 0;
++        recs[i]._pad[0] = recs[i]._pad[1] = 0;
++        memset(recs[i].sub_mb_type, 0, sizeof(recs[i].sub_mb_type));
++        memset(recs[i].mv,          0, sizeof(recs[i].mv));
++        memset(recs[i].ref_idx,    -1, sizeof(recs[i].ref_idx));
++    }
++
++    /*
++     * The recs array is indexed in RASTER order: mb_y * mb_width + mb_x.
++     * h->sl_analysis_recs is a void* to avoid requiring sl_h264_analysis.h
++     * in h264_slice.c; h264_mb.c casts it back to SLH264MBRecord*.
++     * Note: recs must not be accessed after any frame realloc; since we store
++     * the pointer before decoding any MB and h264 does not reallocate pic->f
++     * after alloc, this is safe.
++     */
++    h->sl_analysis_recs = recs;
++    return 0;
++}
++
+ static int output_frame(H264Context *h, AVFrame *dst, H264Picture *srcp)
+ {
+     int ret;
+@@ -888,6 +947,10 @@ static int output_frame(H264Context *h, AVFrame *dst, H264Picture *srcp)
+             goto fail;
+     }
+ 
++    /* AV_FRAME_DATA_SL_H264_ANALYSIS is already on srcp->f (placed at frame
++     * start by ff_h264_sl_analysis_alloc and filled per-MB); av_frame_ref
++     * above has copied it to dst automatically. */
++
+     if (!(h->avctx->export_side_data & AV_CODEC_EXPORT_DATA_FILM_GRAIN))
+         av_frame_remove_side_data(dst, AV_FRAME_DATA_FILM_GRAIN_PARAMS);
+ 
+@@ -1097,6 +1160,7 @@ static const AVOption h264_options[] = {
+     { "x264_build", "Assume this x264 version if no x264 version found in any SEI", OFFSET(x264_build), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, VD },
+     { "skip_gray", "Do not return gray gap frames", OFFSET(skip_gray), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "noref_gray", "Avoid using gray gap frames as references", OFFSET(noref_gray), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, VD },
++    { "export_sl_analysis", "Export Streamlens per-MB analysis side data (requires threads=1)", OFFSET(export_sl_analysis), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { NULL },
+ };
+ 
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 1df99015cc..b09d42367b 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -30,6 +30,7 @@
+ 
+ #include "libavutil/buffer.h"
+ #include "libavutil/mem_internal.h"
++#include "libavutil/sl_h264_analysis.h"
+ 
+ #include "cabac.h"
+ #include "error_resilience.h"
+@@ -580,6 +581,19 @@ typedef struct H264Context {
+     int non_gray;                       ///< Did we encounter a intra frame after a gray gap frame
+     int noref_gray;
+     int skip_gray;
++
++    /** Streamlens: export per-MB analysis side data (AVOption "export_sl_analysis") */
++    int export_sl_analysis;
++    /**
++     * Pointer into the AV_FRAME_DATA_SL_H264_ANALYSIS side data allocated on
++     * h->cur_pic_ptr->f at frame start.  Points at the first SLH264MBRecord
++     * (i.e. past the SLH264AnalysisHeader).
++     * Indexed in RASTER order: mb_y * mb_width + mb_x (no stride padding).
++     * NULL when export_sl_analysis is 0 or picture is not yet started.
++     * Each MB record is filled by ff_h264_hl_decode_mb() and the side data
++     * travels with the picture through the DPB, so reordering is safe.
++     */
++    void *sl_analysis_recs; ///< SLH264MBRecord *, raster indexed
+ } H264Context;
+ 
+ extern const uint16_t ff_h264_mb_sizes[4];
+@@ -679,6 +693,9 @@ static av_always_inline int get_chroma_qp(const PPS *pps, int t, int qscale)
+ 
+ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup);
+ 
++/** Allocate the SL_H264_ANALYSIS side data blob on pic->f and set h->sl_analysis_recs. */
++int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic);
++
+ int ff_h264_ref_picture(H264Picture *dst, const H264Picture *src);
+ int ff_h264_replace_picture(H264Picture *dst, const H264Picture *src);
+ void ff_h264_unref_picture(H264Picture *pic);
+diff --git a/libavutil/Makefile b/libavutil/Makefile
+index ee77e51c08..33227f72c7 100644
+--- a/libavutil/Makefile
++++ b/libavutil/Makefile
+@@ -99,7 +99,8 @@ HEADERS = adler32.h                                                     \
+           xtea.h                                                        \
+           tea.h                                                         \
+           tx.h                                                          \
+-          video_hint.h
++          video_hint.h                                                  \
++          sl_h264_analysis.h
+ 
+ ARCH_HEADERS = bswap.h                                                  \
+                intmath.h                                                \
+diff --git a/libavutil/frame.h b/libavutil/frame.h
+index 088b24b717..571411f5ea 100644
+--- a/libavutil/frame.h
++++ b/libavutil/frame.h
+@@ -260,6 +260,16 @@ enum AVFrameSideDataType {
+      * EXIF metadata, starting with either 49 49 2a 00, or 4d 4d 00 2a.
+      */
+      AV_FRAME_DATA_EXIF,
++
++    /**
++     * Streamlens per-macroblock H.264 analysis data.
++     * The payload is a SLH264AnalysisHeader followed by an array of
++     * SLH264MBRecord (one per MB in raster order), as defined in
++     * libavutil/sl_h264_analysis.h.
++     * Enabled via the h264 decoder AVOption "export_sl_analysis".
++     * Requires threads=1.
++     */
++    AV_FRAME_DATA_SL_H264_ANALYSIS,
+ };
+ 
+ enum AVActiveFormatDescription {
+diff --git a/libavutil/side_data.c b/libavutil/side_data.c
+index 8df117478a..46c43fa5e2 100644
+--- a/libavutil/side_data.c
++++ b/libavutil/side_data.c
+@@ -57,6 +57,7 @@ static const AVSideDataDescriptor sd_props[] = {
+     [AV_FRAME_DATA_SEI_UNREGISTERED]            = { "H.26[45] User Data Unregistered SEI message",  AV_SIDE_DATA_PROP_MULTI },
+     [AV_FRAME_DATA_VIDEO_HINT]                  = { "Encoding video hint",                          AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
+     [AV_FRAME_DATA_3D_REFERENCE_DISPLAYS]       = { "3D Reference Displays Information",            AV_SIDE_DATA_PROP_GLOBAL },
++    [AV_FRAME_DATA_SL_H264_ANALYSIS]            = { "Streamlens H.264 per-MB analysis",             AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
+ };
+ 
+ const AVSideDataDescriptor *av_frame_side_data_desc(enum AVFrameSideDataType type)
+diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
+new file mode 100644
+index 0000000000..816990dc1c
+--- /dev/null
++++ b/libavutil/sl_h264_analysis.h
+@@ -0,0 +1,124 @@
++/*
++ * Streamlens H.264 per-macroblock analysis side data
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Streamlens per-macroblock H.264 analysis side data layout.
++ *
++ * Enabled by setting the AVOption "export_sl_analysis" to 1 on the h264
++ * decoder.  Requires threads=1 (frame threading is incompatible with
++ * per-MB intra-mode capture; the decoder will NOT force this — the caller
++ * must set it).
++ *
++ * The AVFrameSideData blob attached as AV_FRAME_DATA_SL_H264_ANALYSIS is:
++ *
++ *   SLH264AnalysisHeader   (fixed, at offset 0)
++ *   SLH264MBRecord[mb_width * mb_height]  (raster order, row-major)
++ *
++ * All fields are native-endian (the library and consumer are always the
++ * same binary).  The struct is packed to avoid padding surprises on
++ * platforms where int alignment > 1.
++ *
++ * Version history:
++ *   1 — initial layout
++ */
++
++#ifndef AVUTIL_SL_H264_ANALYSIS_H
++#define AVUTIL_SL_H264_ANALYSIS_H
++
++#include <stdint.h>
++
++#define SL_H264_ANALYSIS_VERSION 1
++
++/**
++ * Header placed at the start of the AV_FRAME_DATA_SL_H264_ANALYSIS blob.
++ */
++typedef struct SLH264AnalysisHeader {
++    uint32_t version;       /**< Always SL_H264_ANALYSIS_VERSION */
++    uint32_t mb_width;      /**< Width in macroblocks */
++    uint32_t mb_height;     /**< Height in macroblocks */
++    uint32_t mb_stride;     /**< Stride in macroblocks (may be > mb_width) */
++} __attribute__((packed)) SLH264AnalysisHeader;
++
++/**
++ * Per-macroblock analysis record.  One entry per MB in raster order
++ * (row * mb_width + col), NOT row * mb_stride + col.
++ *
++ * mb_type:
++ *   Raw uint32 from FFmpeg's internal mb_type array (mpegutils.h macros
++ *   IS_INTRA4x4, IS_INTRA16x16, IS_SKIP, IS_DIRECT, IS_INTRA, etc.).
++ *   Bit definitions match MB_TYPE_* in libavcodec/mpegutils.h.
++ *
++ * intra4x4_pred_modes:
++ *   Valid only when IS_INTRA4x4(mb_type).  16 entries in scan4 order
++ *   (FFmpeg's scan8[] indices 0..15, which map to the 4x4 luma blocks
++ *   in standard H.264 raster-within-MB order).
++ *   Values are FFmpeg internal intra4x4 mode codes:
++ *     0-8:  standard H.264 intra4x4 prediction modes
++ *     9:    LEFT_DC_PRED  (DC using left samples only; top unavailable)
++ *     10:   TOP_DC_PRED   (DC using top samples only; left unavailable)
++ *     11:   DC_128_PRED   (DC using constant 128; both neighbors unavailable)
++ *   Set to 0x7F when not applicable (non-intra4x4 MB).
++ *
++ * ref_idx[list][part]:
++ *   Reference index per 8x8 partition (0..3), per list (0=L0, 1=L1).
++ *   -1 = not used / not available for this list.
++ *
++ * mv[list][blk4x4][xy]:
++ *   Motion vector in quarter-pel units, per 4x4 block (0..15) per list.
++ *   blk4x4 is in scan4/scan8 order (matches FFmpeg's motion_val layout).
++ *   0 when not applicable.
++ *
++ * sub_mb_type[part]:
++ *   Sub-MB partition type for 8x8 partitions (0..3), in MB_TYPE_* units.
++ *   0 when not a P/B 8x8 partition MB.
++ *
++ * chroma_pred_mode:
++ *   H.264 intra chroma prediction mode (0=DC,1=Horiz,2=Vert,3=Plane).
++ *   0xFF when not an intra MB.
++ *
++ * intra16x16_pred_mode:
++ *   H.264 intra-16x16 luma prediction mode.
++ *   0xFF when not IS_INTRA16x16.
++ *
++ * transform_8x8:
++ *   1 if 8x8 DCT is used (IS_8x8DCT), 0 otherwise.
++ *
++ * qp:
++ *   Quantisation parameter for this MB (luma).
++ *
++ * slice_id:
++ *   Slice index for this MB (from h->slice_table), or 0xFFFF if unknown.
++ */
++typedef struct SLH264MBRecord {
++    uint32_t mb_type;
++    uint32_t sub_mb_type[4];
++    int16_t  mv[2][16][2];
++    int8_t   ref_idx[2][4];
++    int8_t   intra4x4_pred_modes[16];
++    uint8_t  chroma_pred_mode;
++    uint8_t  intra16x16_pred_mode;
++    uint8_t  transform_8x8;
++    int8_t   qp;
++    uint16_t slice_id;
++    uint8_t  _pad[2];
++} __attribute__((packed)) SLH264MBRecord;
++
++#endif /* AVUTIL_SL_H264_ANALYSIS_H */
+-- 
+2.39.5 (Apple Git-154)
+

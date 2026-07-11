@@ -1,0 +1,124 @@
+From df7484b7b44f0c46012a0e3782b337d795000569 Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 14:57:08 +0200
+Subject: [PATCH 5/6] fix(sl-h264): make analysis export FF_THREAD_FRAME safe
+
+Two bugs caused non-deterministic analysis records when decoding with
+frame threading (motion_val pool buffers are recycled without zeroing):
+
+1. sub_mb_type was unconditionally copied from H264SliceContext for all
+   MBs. For non-8x8-partition MBs, sl->sub_mb_type holds stale values
+   from the previous 8x8 MB decode on the same thread. Fix: only copy
+   sub_mb_type when mb_type & MB_TYPE_8x8.
+
+2. motion_val[list] and ref_index[list] were read unconditionally for
+   both lists. For lists not used by a given MB (e.g. list 1 for P-frame
+   MBs), write_back_motion() leaves the motion_val entries unwritten, so
+   recycled pool buffers contain stale data. Fix: zero unused list slots.
+
+With both fixes, threads=1 and threads=4 (FF_THREAD_FRAME) produce
+byte-exact analysis blobs and stage planes for all 75 frames of the
+test fixture. Update option description and header comments accordingly.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libavcodec/h264_mb.c         | 34 +++++++++++++++++++++++-----------
+ libavcodec/h264dec.c         |  2 +-
+ libavcodec/h264dec.h         |  3 ++-
+ libavutil/sl_h264_analysis.h |  5 ++---
+ 4 files changed, 28 insertions(+), 16 deletions(-)
+
+diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
+index 78ca23289b..46b281009f 100644
+--- a/libavcodec/h264_mb.c
++++ b/libavcodec/h264_mb.c
+@@ -849,20 +849,32 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
+         r->intra16x16_pred_mode = IS_INTRA16x16(mb_type)
+                                   ? (uint8_t)sl->intra16x16_pred_mode : 0xFF;
+ 
+-        for (int i = 0; i < 4; i++)
+-            r->sub_mb_type[i] = sl->sub_mb_type[i];
++        /* sub_mb_type is only valid for 8x8 partition MBs; zero it otherwise
++         * to avoid leaking stale H264SliceContext state across frames. */
++        if (mb_type & MB_TYPE_8x8) {
++            for (int i = 0; i < 4; i++)
++                r->sub_mb_type[i] = sl->sub_mb_type[i];
++        } else {
++            memset(r->sub_mb_type, 0, sizeof(r->sub_mb_type));
++        }
+ 
+         for (int list = 0; list < 2; list++) {
+-            for (int part = 0; part < 4; part++)
+-                r->ref_idx[list][part] = h->cur_pic.ref_index[list][b8_xy + part];
+-            for (int row = 0; row < 4; row++) {
+-                for (int col = 0; col < 4; col++) {
+-                    const int blk          = row * 4 + col;
+-                    const int16_t (*mv)[2] =
+-                        &h->cur_pic.motion_val[list][b_xy + row * b_stride + col];
+-                    r->mv[list][blk][0] = (*mv)[0];
+-                    r->mv[list][blk][1] = (*mv)[1];
++            if (USES_LIST(mb_type, list)) {
++                for (int part = 0; part < 4; part++)
++                    r->ref_idx[list][part] = h->cur_pic.ref_index[list][b8_xy + part];
++                for (int row = 0; row < 4; row++) {
++                    for (int col = 0; col < 4; col++) {
++                        const int blk          = row * 4 + col;
++                        const int16_t (*mv)[2] =
++                            &h->cur_pic.motion_val[list][b_xy + row * b_stride + col];
++                        r->mv[list][blk][0] = (*mv)[0];
++                        r->mv[list][blk][1] = (*mv)[1];
++                    }
+                 }
++            } else {
++                /* list not used by this MB; zero to avoid stale pool data */
++                memset(r->mv[list],      0, sizeof(r->mv[list]));
++                memset(r->ref_idx[list], -1, sizeof(r->ref_idx[list]));
+             }
+         }
+ 
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index ad977e42f7..893aa1b5f5 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -1232,7 +1232,7 @@ static const AVOption h264_options[] = {
+     { "x264_build", "Assume this x264 version if no x264 version found in any SEI", OFFSET(x264_build), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, VD },
+     { "skip_gray", "Do not return gray gap frames", OFFSET(skip_gray), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "noref_gray", "Avoid using gray gap frames as references", OFFSET(noref_gray), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, VD },
+-    { "export_sl_analysis", "Export Streamlens per-MB analysis side data (requires threads=1)", OFFSET(export_sl_analysis), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
++    { "export_sl_analysis", "Export Streamlens per-MB analysis side data (FF_THREAD_FRAME safe)", OFFSET(export_sl_analysis), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "export_sl_stages", "Also export predicted/unfiltered stage planes (needs export_sl_analysis)", OFFSET(export_sl_stages), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { NULL },
+ };
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index d7103fcbb9..df548720b3 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -597,7 +597,8 @@ typedef struct H264Context {
+      * Indexed in RASTER order: mb_y * mb_width + mb_x (no stride padding).
+      * NULL when export_sl_analysis is 0 or picture is not yet started.
+      * Each MB record is filled by ff_h264_hl_decode_mb() and the side data
+-     * travels with the picture through the DPB, so reordering is safe.
++     * travels with the picture through the DPB, so reordering and frame
++     * threading are safe (each worker has its own H264Context and picture).
+      */
+     void *sl_analysis_recs; ///< SLH264MBRecord *, raster indexed
+ 
+diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
+index 08d57f0194..b3e3ad2c62 100644
+--- a/libavutil/sl_h264_analysis.h
++++ b/libavutil/sl_h264_analysis.h
+@@ -23,9 +23,8 @@
+  * Streamlens per-macroblock H.264 analysis side data layout.
+  *
+  * Enabled by setting the AVOption "export_sl_analysis" to 1 on the h264
+- * decoder.  Requires threads=1 (frame threading is incompatible with
+- * per-MB intra-mode capture; the decoder will NOT force this — the caller
+- * must set it).
++ * decoder.  Compatible with FF_THREAD_FRAME (frame-thread safe; each worker
++ * decodes its own frame independently and the side data travels with pic->f).
+  *
+  * The AVFrameSideData blob attached as AV_FRAME_DATA_SL_H264_ANALYSIS is:
+  *
+-- 
+2.39.5 (Apple Git-154)
+

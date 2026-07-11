@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/types",
     "crates/syntax",
+    "crates/gst",
 ]
 
 [workspace.package]

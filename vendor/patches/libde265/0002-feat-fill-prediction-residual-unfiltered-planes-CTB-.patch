@@ -1,0 +1,407 @@
+From 283bf10af711b17ce0453f4d01fe869c7f2aaf53 Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 13:55:42 +0200
+Subject: [PATCH 2/3] feat: fill prediction/residual/unfiltered planes + CTB
+ bits + POC getter
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- transform.cc: capture prediction (8-bit, before add_residual) and
+  residual (reconstructed−prediction, +128 bias stored as u8) in the
+  scale_coefficients_internal TU path. 10-bit left unfilled.
+  Residual plane initialized to 128 (bias offset) so zero-coefficient
+  TUs decode as i16=0 after un-biasing.
+- decctx.cc: full-frame memcpy to unfiltered planes immediately before
+  run_postprocessing_filters (deblock + SAO).
+- slice.cc: CABAC byte-delta × 8 stored in ctb_bits[] around each CTU
+  decode (~8-bit granularity).
+- image.h/image.cc: add pixels_unfiltered[3], pixels_confwin_unfiltered[3],
+  ctb_bits uint32_t array; expand alloc_internals_planes signature;
+  release_internals_planes frees new allocations.
+- de265_internals.h/cc: DE265_INTERNALS_DECODER_PARAM_SAVE_UNFILTERED
+  enum value; get_image_plane handles UNFILTERED case;
+  de265_internals_get_CTB_bits(), de265_internals_get_image_poc().
+- decctx.h: param_internals_save_unfiltered flag.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libde265/de265_internals.cc | 27 +++++++++++++++++++++++
+ libde265/de265_internals.h  | 23 +++++++++++++++++++-
+ libde265/decctx.cc          | 18 ++++++++++++++++
+ libde265/decctx.h           |  1 +
+ libde265/image.cc           | 41 ++++++++++++++++++++++++++---------
+ libde265/image.h            | 16 +++++++++++---
+ libde265/slice.cc           | 12 +++++++++++
+ libde265/transform.cc       | 43 +++++++++++++++++++++++++++++++++++++
+ 8 files changed, 167 insertions(+), 14 deletions(-)
+
+diff --git a/libde265/de265_internals.cc b/libde265/de265_internals.cc
+index 93c13993..79926f91 100644
+--- a/libde265/de265_internals.cc
++++ b/libde265/de265_internals.cc
+@@ -27,6 +27,7 @@
+ #include "decctx.h"
+ 
+ #include <assert.h>
++#include <string.h>
+ 
+ 
+ LIBDE265_API void de265_internals_set_parameter_bool(de265_decoder_context* de265ctx,
+@@ -44,6 +45,9 @@ LIBDE265_API void de265_internals_set_parameter_bool(de265_decoder_context* de26
+     case DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF:
+       ctx->param_internals_save_tr_coeff = (value != 0);
+       break;
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_UNFILTERED:
++      ctx->param_internals_save_unfiltered = (value != 0);
++      break;
+     default:
+       assert(false);
+       break;
+@@ -69,6 +73,9 @@ LIBDE265_API const uint8_t* de265_internals_get_image_plane(const struct de265_i
+     case DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF:
+       data = img->pixels_confwin_tr_coeff[channel];
+       break;
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_UNFILTERED:
++      data = img->pixels_confwin_unfiltered[channel];
++      break;
+     default:
+       assert(false);
+       break;
+@@ -170,3 +177,23 @@ LIBDE265_API void de265_internals_get_TUInfo_info(const struct de265_image* img,
+ {
+   img->internals_get_TUInfo_info(tuInfo);
+ }
++
++
++LIBDE265_API void de265_internals_get_CTB_bits(const struct de265_image* img,
++                                               uint32_t* out)
++{
++  int w = 0, h = 0, log2 = 0;
++  img->internals_get_CTB_Info_Layout(&w, &h, &log2);
++  int n = w * h;
++  if (img->ctb_bits) {
++    memcpy(out, img->ctb_bits, n * sizeof(uint32_t));
++  } else {
++    memset(out, 0, n * sizeof(uint32_t));
++  }
++}
++
++
++LIBDE265_API int de265_internals_get_image_poc(const struct de265_image* img)
++{
++  return img->PicOrderCntVal;
++}
+diff --git a/libde265/de265_internals.h b/libde265/de265_internals.h
+index 0af63305..9407002b 100644
+--- a/libde265/de265_internals.h
++++ b/libde265/de265_internals.h
+@@ -35,7 +35,14 @@ extern "C" {
+ enum de265_internals_param {
+   DE265_INTERNALS_DECODER_PARAM_SAVE_PREDICTION = 0,
+   DE265_INTERNALS_DECODER_PARAM_SAVE_RESIDUAL,
+-  DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF
++  DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF,
++  /*
++   * Capture the reconstruction BEFORE the in-loop filters (deblock + SAO).
++   * The plane is a full-frame copy taken just before run_postprocessing_filters
++   * fires.  One memcpy per frame.  Format: same as the main decoded plane
++   * (u8 for 8-bit, u16 little-endian for 10-bit).
++   */
++  DE265_INTERNALS_DECODER_PARAM_SAVE_UNFILTERED
+ };
+ 
+ /*
+@@ -141,6 +148,20 @@ LIBDE265_API void de265_internals_get_intraDir_info(const struct de265_image* im
+                                                     uint8_t* intraDir,
+                                                     uint8_t* intraDirChroma);
+ 
++/*
++ * Per-CTB approximate coded bit count.
++ * Same grid layout as get_CTB_Info_Layout (widthInUnits * heightInUnits uint32_t elements).
++ * Filled from CABAC byte-position deltas around each CTU (~8-bit granularity).
++ * out must hold widthInUnits * heightInUnits elements.
++ */
++LIBDE265_API void de265_internals_get_CTB_bits(const struct de265_image* img,
++                                               uint32_t* out);
++
++/*
++ * Picture Order Count value for this image (PicOrderCntVal).
++ */
++LIBDE265_API int de265_internals_get_image_poc(const struct de265_image* img);
++
+ /*
+  * TU grid layout (log2UnitSize = Log2MinTrafoSize).
+  */
+diff --git a/libde265/decctx.cc b/libde265/decctx.cc
+index 34ee2e61..0a1c1d4a 100644
+--- a/libde265/decctx.cc
++++ b/libde265/decctx.cc
+@@ -622,6 +622,24 @@ de265_error decoder_context::decode_some(bool* did_work)
+ 
+ 
+ 
++    // capture unfiltered frame before deblock/SAO
++    {
++      de265_image* fimg = imgunit->img;
++      if (fimg->pixels_unfiltered[0]) {
++        int bpp_y = (fimg->BitDepth_Y + 7) / 8;
++        int bpp_c = (fimg->BitDepth_C + 7) / 8;
++        ptrdiff_t ls = fimg->get_luma_stride();
++        ptrdiff_t cs = fimg->get_chroma_stride();
++        size_t luma_bytes   = static_cast<size_t>(ls) * fimg->get_height(0) * bpp_y;
++        size_t chroma_bytes = static_cast<size_t>(cs) * fimg->get_height(1) * bpp_c;
++        memcpy(fimg->pixels_unfiltered[0], fimg->get_image_plane(0), luma_bytes);
++        if (fimg->pixels_unfiltered[1] && fimg->get_image_plane(1))
++          memcpy(fimg->pixels_unfiltered[1], fimg->get_image_plane(1), chroma_bytes);
++        if (fimg->pixels_unfiltered[2] && fimg->get_image_plane(2))
++          memcpy(fimg->pixels_unfiltered[2], fimg->get_image_plane(2), chroma_bytes);
++      }
++    }
++
+     // run post-processing filters (deblocking & SAO)
+ 
+     if (img->decctx->num_worker_threads)
+diff --git a/libde265/decctx.h b/libde265/decctx.h
+index 964e6d65..a7a25ff4 100644
+--- a/libde265/decctx.h
++++ b/libde265/decctx.h
+@@ -360,6 +360,7 @@ class decoder_context : public base_context {
+   bool param_internals_save_prediction = false;
+   bool param_internals_save_residual   = false;
+   bool param_internals_save_tr_coeff  = false;
++  bool param_internals_save_unfiltered = false;
+ 
+   de265_security_limits param_security_limits = {
+     1,                // version
+diff --git a/libde265/image.cc b/libde265/image.cc
+index 765d0dc4..843889d6 100644
+--- a/libde265/image.cc
++++ b/libde265/image.cc
+@@ -194,7 +194,8 @@ void de265_image::set_image_plane(int cIdx, uint8_t* mem, ptrdiff_t stride, void
+ }
+ 
+ 
+-void de265_image::alloc_internals_planes(bool save_prediction, bool save_residual, bool save_tr_coeff)
++void de265_image::alloc_internals_planes(bool save_prediction, bool save_residual, bool save_tr_coeff,
++                                          bool save_unfiltered, bool save_ctb_bits)
+ {
+   // luma: stride * height bytes (already set from main allocation)
+   size_t luma_bytes   = static_cast<size_t>(stride)        * height        * ((BitDepth_Y+7)/8) + MEMORY_PADDING;
+@@ -206,10 +207,14 @@ void de265_image::alloc_internals_planes(bool save_prediction, bool save_residua
+     uint8_t** raw;
+     uint8_t** confwin;
+     bool       enabled;
+-  } sets[3] = {
+-    { pixels_prediction, pixels_confwin_prediction, save_prediction },
+-    { pixels_residual,   pixels_confwin_residual,   save_residual   },
+-    { pixels_tr_coeff,   pixels_confwin_tr_coeff,   save_tr_coeff   },
++    // Initial fill value: 0 for most planes; 128 for residual (bias offset so that
++    // zero-coefficient TUs decode as i16=0 after un-biasing with -128 in the consumer).
++    uint8_t    fill;
++  } sets[4] = {
++    { pixels_prediction, pixels_confwin_prediction, save_prediction, 0   },
++    { pixels_residual,   pixels_confwin_residual,   save_residual,   128 },
++    { pixels_tr_coeff,   pixels_confwin_tr_coeff,   save_tr_coeff,   0   },
++    { pixels_unfiltered, pixels_confwin_unfiltered,  save_unfiltered, 0   },
+   };
+ 
+   // conformance window offsets (pixel units per channel)
+@@ -223,13 +228,13 @@ void de265_image::alloc_internals_planes(bool save_prediction, bool save_residua
+       continue;
+     }
+     s.raw[0] = static_cast<uint8_t*>(ALLOC_ALIGNED_16(luma_bytes));
+-    if (s.raw[0]) memset(s.raw[0], 0, luma_bytes);
++    if (s.raw[0]) memset(s.raw[0], s.fill, luma_bytes);
+ 
+     if (!mono) {
+       s.raw[1] = static_cast<uint8_t*>(ALLOC_ALIGNED_16(chroma_bytes));
+       s.raw[2] = static_cast<uint8_t*>(ALLOC_ALIGNED_16(chroma_bytes));
+-      if (s.raw[1]) memset(s.raw[1], 0, chroma_bytes);
+-      if (s.raw[2]) memset(s.raw[2], 0, chroma_bytes);
++      if (s.raw[1]) memset(s.raw[1], s.fill, chroma_bytes);
++      if (s.raw[2]) memset(s.raw[2], s.fill, chroma_bytes);
+     } else {
+       s.raw[1] = nullptr;
+       s.raw[2] = nullptr;
+@@ -250,6 +255,14 @@ void de265_image::alloc_internals_planes(bool save_prediction, bool save_residua
+         s.confwin[c] = nullptr;
+     }
+   }
++
++  // CTB bits array: one uint32_t per CTB.
++  if (save_ctb_bits) {
++    size_t n = static_cast<size_t>(ctb_info.data_size);
++    ctb_bits = new uint32_t[n]();  // zero-initialized
++  } else {
++    ctb_bits = nullptr;
++  }
+ }
+ 
+ 
+@@ -259,13 +272,18 @@ void de265_image::release_internals_planes()
+     FREE_ALIGNED(pixels_prediction[c]);
+     FREE_ALIGNED(pixels_residual[c]);
+     FREE_ALIGNED(pixels_tr_coeff[c]);
++    FREE_ALIGNED(pixels_unfiltered[c]);
+     pixels_prediction[c]         = nullptr;
+     pixels_confwin_prediction[c] = nullptr;
+     pixels_residual[c]           = nullptr;
+     pixels_confwin_residual[c]   = nullptr;
+     pixels_tr_coeff[c]           = nullptr;
+     pixels_confwin_tr_coeff[c]   = nullptr;
++    pixels_unfiltered[c]         = nullptr;
++    pixels_confwin_unfiltered[c] = nullptr;
+   }
++  delete[] ctb_bits;
++  ctb_bits = nullptr;
+ }
+ 
+ 
+@@ -521,11 +539,14 @@ de265_error de265_image::alloc_image(int w,int h, enum de265_chroma c,
+   if (decctx &&
+       (decctx->param_internals_save_prediction ||
+        decctx->param_internals_save_residual   ||
+-       decctx->param_internals_save_tr_coeff))
++       decctx->param_internals_save_tr_coeff   ||
++       decctx->param_internals_save_unfiltered))
+   {
+     alloc_internals_planes(decctx->param_internals_save_prediction,
+                            decctx->param_internals_save_residual,
+-                           decctx->param_internals_save_tr_coeff);
++                           decctx->param_internals_save_tr_coeff,
++                           decctx->param_internals_save_unfiltered,
++                           true /* always track CTB bits when any internals are active */);
+   }
+ 
+   return DE265_OK;
+diff --git a/libde265/image.h b/libde265/image.h
+index 1c225f59..4d203450 100644
+--- a/libde265/image.h
++++ b/libde265/image.h
+@@ -359,6 +359,14 @@ public:
+   uint8_t* pixels_tr_coeff[3]           = { nullptr, nullptr, nullptr };
+   uint8_t* pixels_confwin_tr_coeff[3]   = { nullptr, nullptr, nullptr };
+ 
++  // Unfiltered: full-frame copy taken before deblock/SAO; same layout as main planes.
++  uint8_t* pixels_unfiltered[3]         = { nullptr, nullptr, nullptr };
++  uint8_t* pixels_confwin_unfiltered[3] = { nullptr, nullptr, nullptr };
++
++  // Per-CTB coded bit counts (CABAC byte-delta × 8); same grid as ctb_info.
++  // nullptr when not requested.
++  uint32_t* ctb_bits = nullptr;
++
+   // --- decoding info ---
+ 
+   // If PicOutputFlag==false && PicState==UnusedForReference, image buffer is free.
+@@ -866,9 +874,11 @@ public:
+ 
+   // --- internals analytics (streamlens port) ---
+ 
+-  // Allocate prediction/residual/tr_coeff planes according to decoder params.
+-  // Must be called after the main image allocation (pixels[] and strides set).
+-  void alloc_internals_planes(bool save_prediction, bool save_residual, bool save_tr_coeff);
++  // Allocate prediction/residual/tr_coeff/unfiltered planes and CTB bits array
++  // according to decoder params. Must be called after the main image allocation
++  // (pixels[] and strides set).
++  void alloc_internals_planes(bool save_prediction, bool save_residual, bool save_tr_coeff,
++                               bool save_unfiltered, bool save_ctb_bits);
+ 
+   // Release internals planes (called from release()).
+   void release_internals_planes();
+diff --git a/libde265/slice.cc b/libde265/slice.cc
+index c46919ed..e05b36de 100644
+--- a/libde265/slice.cc
++++ b/libde265/slice.cc
+@@ -4803,8 +4803,20 @@ enum DecodeResult decode_substream(thread_context* tctx,
+       return Decode_Error;
+     }
+ 
++    // record CABAC byte position before decoding this CTU
++    const uint8_t* cabac_before = tctx->cabac_decoder.bitstream_curr;
++
+     read_coding_tree_unit(tctx);
+ 
++    // store CTB bit count (byte delta × 8, ~8-bit CABAC granularity)
++    if (tctx->img->ctb_bits) {
++      const uint8_t* cabac_after = tctx->cabac_decoder.bitstream_curr;
++      ptrdiff_t byte_delta = cabac_after - cabac_before;
++      if (byte_delta < 0) byte_delta = 0; // paranoia: byte position should not go backwards
++      uint32_t bits = static_cast<uint32_t>(byte_delta) * 8;
++      tctx->img->ctb_bits[ctbx + ctby * ctbW] = bits;
++    }
++
+ 
+     // save CABAC-model for WPP (except in last CTB row)
+ 
+diff --git a/libde265/transform.cc b/libde265/transform.cc
+index 4d832eb9..56d6a7eb 100644
+--- a/libde265/transform.cc
++++ b/libde265/transform.cc
+@@ -22,6 +22,7 @@
+ #include "util.h"
+ 
+ #include <assert.h>
++#include <string.h>
+ 
+ 
+ const int tab8_22[] = { 29,30,31,32,33,33,34,34,35,35,36,36,37 /*,37*/ };
+@@ -401,6 +402,24 @@ void scale_coefficients_internal(thread_context* tctx,
+   //assert(intra == (tctx->img->get_pred_mode(xT,yT)==MODE_INTRA));
+   int cuPredModeIntra = (tctx->img->get_pred_mode(xT,yT)==MODE_INTRA);
+ 
++  // --- internals: capture prediction (8-bit only) ---
++  // pred currently holds the intra/inter prediction samples; copy before add_residual.
++  const bool capture_pred = (sizeof(pixel_t)==1) &&
++                             (tctx->img->pixels_prediction[cIdx] != nullptr);
++  const bool capture_res  = (sizeof(pixel_t)==1) &&
++                             (tctx->img->pixels_residual[cIdx]   != nullptr);
++  if (capture_pred || capture_res) {
++    // Store the prediction block so we can compute residual after.
++    // We write directly to the internals plane (same stride as main plane).
++    if (capture_pred) {
++      uint8_t* dst = tctx->img->pixels_prediction[cIdx] +
++                     xT + static_cast<ptrdiff_t>(yT) * stride;
++      const uint8_t* src = reinterpret_cast<const uint8_t*>(pred);
++      for (int row = 0; row < nT; row++)
++        memcpy(dst + row * stride, src + row * stride, nT);
++    }
++  }
++
+   bool rotateCoeffs = (sps.range_extension.transform_skip_rotation_enabled_flag &&
+                        nT == 4 &&
+                        cuPredModeIntra);
+@@ -634,6 +653,30 @@ void scale_coefficients_internal(thread_context* tctx,
+     logtrace(LogTransform,"*\n");
+   }
+ 
++  // --- internals: capture residual (8-bit only) ---
++  // pred now holds reconstructed samples; prediction plane (captured above) holds prediction.
++  // Residual = reconstructed - prediction, stored with +128 bias as u8.
++  if (capture_res) {
++    const uint8_t* pred_plane = tctx->img->pixels_prediction[cIdx];
++    uint8_t*       res_plane  = tctx->img->pixels_residual[cIdx];
++    if (pred_plane && res_plane) {
++      const uint8_t* pred_src  = pred_plane + xT + static_cast<ptrdiff_t>(yT) * stride;
++      const uint8_t* recon_src = reinterpret_cast<const uint8_t*>(pred);
++      uint8_t*       res_dst   = res_plane  + xT + static_cast<ptrdiff_t>(yT) * stride;
++      for (int row = 0; row < nT; row++) {
++        for (int col = 0; col < nT; col++) {
++          int r = static_cast<int>(recon_src[row * stride + col]) -
++                  static_cast<int>(pred_src [row * stride + col]);
++          // clamp to [0,255] with +128 bias
++          int v = r + 128;
++          if (v < 0) v = 0;
++          else if (v > 255) v = 255;
++          res_dst[row * stride + col] = static_cast<uint8_t>(v);
++        }
++      }
++    }
++  }
++
+   // zero out scrap coefficient buffer again
+ 
+   for (int i=0;i<tctx->nCoeff[cIdx];i++) {
+-- 
+2.39.5 (Apple Git-154)
+

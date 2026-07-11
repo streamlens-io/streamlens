@@ -1,0 +1,41 @@
+From 9b0a0640ba1eb52b38cd3507c321e7bf955cf70b Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 14:17:54 +0200
+Subject: [PATCH 3/3] fix: always track CTB bit counts independent of
+ stage-plane params
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libde265/image.cc | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+diff --git a/libde265/image.cc b/libde265/image.cc
+index 843889d6..8d4bdb53 100644
+--- a/libde265/image.cc
++++ b/libde265/image.cc
+@@ -535,18 +535,14 @@ de265_error de265_image::alloc_image(int w,int h, enum de265_chroma c,
+       }
+   }
+ 
+-  // allocate internals analytics planes if requested
+-  if (decctx &&
+-      (decctx->param_internals_save_prediction ||
+-       decctx->param_internals_save_residual   ||
+-       decctx->param_internals_save_tr_coeff   ||
+-       decctx->param_internals_save_unfiltered))
+-  {
++  // Allocate internals analytics data. CTB bit counts are a few KB and
++  // always tracked; the stage planes only when requested (frame-sized).
++  if (decctx) {
+     alloc_internals_planes(decctx->param_internals_save_prediction,
+                            decctx->param_internals_save_residual,
+                            decctx->param_internals_save_tr_coeff,
+                            decctx->param_internals_save_unfiltered,
+-                           true /* always track CTB bits when any internals are active */);
++                           true /* CTB bits: always */);
+   }
+ 
+   return DE265_OK;
+-- 
+2.39.5 (Apple Git-154)
+

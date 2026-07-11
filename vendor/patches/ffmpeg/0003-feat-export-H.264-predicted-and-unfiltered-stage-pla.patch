@@ -1,0 +1,370 @@
+From d27247da923afa40cf3d417cca3f48f66cf36146 Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 13:27:57 +0200
+Subject: [PATCH 3/6] feat: export H.264 predicted and unfiltered stage planes
+ as side data
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds AV_FRAME_DATA_SL_H264_STAGES: a pixel-plane blob attached alongside
+AV_FRAME_DATA_SL_H264_ANALYSIS when export_sl_analysis=1.
+
+Layout (libavutil/sl_h264_analysis.h — SLH264StagesHeader):
+  SLH264StagesHeader  (version=1, width, height, luma_stride,
+                       chroma_stride, chroma_height, plane offsets)
+  uint8_t[luma_stride*height]          predicted Y
+  uint8_t[chroma_stride*chroma_height] predicted Cb
+  uint8_t[chroma_stride*chroma_height] predicted Cr
+  uint8_t[luma_stride*height]          unfiltered Y
+  uint8_t[chroma_stride*chroma_height] unfiltered Cb
+  uint8_t[chroma_stride*chroma_height] unfiltered Cr
+
+Capture points in FUNC(hl_decode_mb) (SIMPLE/8-bit path only):
+  predicted  — after intra prediction / motion compensation, BEFORE the
+               IDCT residual add (dest_y/cb/cr hold the predicted signal).
+  unfiltered — after IDCT residual add, BEFORE deblocking (deblocking
+               runs later per-row; this is the reconstructed sample).
+
+Limitations noted in header:
+  - MBAFF: planes are allocated but zeroed (MB_FIELD path not captured).
+  - High bit-depth: side data not attached (PIXEL_SHIFT != 0 excluded).
+  - Only progressive (frame_mbs_only) streams are fully covered.
+
+Implementation:
+  ff_h264_sl_stages_alloc() (h264dec.c): allocates side data on pic->f,
+  populates SLH264StagesHeader, and sets h->sl_stages_{pred,unfilt}_{y,cb,cr}
+  pointer fields (new in H264Context). Called from h264_frame_start() next
+  to ff_h264_sl_analysis_alloc(); side data travels through the DPB so
+  display-order reordering is transparent. Requires threads=1.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libavcodec/h264_mb_template.c | 54 +++++++++++++++++++++++++
+ libavcodec/h264_slice.c       | 11 +++++-
+ libavcodec/h264dec.c          | 74 ++++++++++++++++++++++++++++++++++-
+ libavcodec/h264dec.h          | 23 +++++++++++
+ libavutil/frame.h             | 11 ++++++
+ libavutil/side_data.c         |  1 +
+ libavutil/sl_h264_analysis.h  | 45 +++++++++++++++++++++
+ 7 files changed, 217 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/h264_mb_template.c b/libavcodec/h264_mb_template.c
+index d5ea26a6e3..84f482b4fa 100644
+--- a/libavcodec/h264_mb_template.c
++++ b/libavcodec/h264_mb_template.c
+@@ -187,6 +187,33 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
+             }
+         }
+ 
++/* Capture predicted plane (after intra pred / MC, before IDCT residual add).
++ * Only in the SIMPLE 8-bit path (MBAFF uses the complex path; high-bit-depth
++ * uses PIXEL_SHIFT != 0, also excluded).  Non-MBAFF progressive only. */
++#if SIMPLE && BITS == 8
++        if (h->sl_stages_pred_y && !MB_FIELD(sl)) {
++            const int chroma_block_h = 16 >> h->chroma_y_shift;
++            uint8_t *dst_y  = h->sl_stages_pred_y
++                              + mb_y * (int)h->sl_stages_luma_stride   * 16
++                              + mb_x * 16;
++            uint8_t *dst_cb = h->sl_stages_pred_cb
++                              + mb_y * (int)h->sl_stages_chroma_stride * chroma_block_h
++                              + mb_x * 8;
++            uint8_t *dst_cr = h->sl_stages_pred_cr
++                              + mb_y * (int)h->sl_stages_chroma_stride * chroma_block_h
++                              + mb_x * 8;
++            for (int _r = 0; _r < 16; _r++)
++                memcpy(dst_y  + _r * (int)h->sl_stages_luma_stride,
++                       dest_y + _r * linesize, 16);
++            for (int _r = 0; _r < chroma_block_h; _r++) {
++                memcpy(dst_cb + _r * (int)h->sl_stages_chroma_stride,
++                       dest_cb + _r * uvlinesize, 8);
++                memcpy(dst_cr + _r * (int)h->sl_stages_chroma_stride,
++                       dest_cr + _r * uvlinesize, 8);
++            }
++        }
++#endif /* SIMPLE && BITS == 8 */
++
+         hl_decode_mb_idct_luma(h, sl, mb_type, SIMPLE, transform_bypass,
+                                PIXEL_SHIFT, block_offset, linesize, dest_y, 0);
+ 
+@@ -244,6 +271,33 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
+                                           sl->non_zero_count_cache);
+             }
+         }
++
++/* Capture unfiltered plane (reconstructed, before deblocking filter).
++ * Deblocking runs later per-row, so what is in dest_y/cb/cr here is the
++ * reconstructed but not-yet-deblocked sample. */
++#if SIMPLE && BITS == 8
++        if (h->sl_stages_unfilt_y && !MB_FIELD(sl)) {
++            const int chroma_block_h = 16 >> h->chroma_y_shift;
++            uint8_t *dst_y  = h->sl_stages_unfilt_y
++                              + mb_y * (int)h->sl_stages_luma_stride   * 16
++                              + mb_x * 16;
++            uint8_t *dst_cb = h->sl_stages_unfilt_cb
++                              + mb_y * (int)h->sl_stages_chroma_stride * chroma_block_h
++                              + mb_x * 8;
++            uint8_t *dst_cr = h->sl_stages_unfilt_cr
++                              + mb_y * (int)h->sl_stages_chroma_stride * chroma_block_h
++                              + mb_x * 8;
++            for (int _r = 0; _r < 16; _r++)
++                memcpy(dst_y  + _r * (int)h->sl_stages_luma_stride,
++                       dest_y + _r * linesize, 16);
++            for (int _r = 0; _r < chroma_block_h; _r++) {
++                memcpy(dst_cb + _r * (int)h->sl_stages_chroma_stride,
++                       dest_cb + _r * uvlinesize, 8);
++                memcpy(dst_cr + _r * (int)h->sl_stages_chroma_stride,
++                       dest_cr + _r * uvlinesize, 8);
++            }
++        }
++#endif /* SIMPLE && BITS == 8 */
+     }
+ }
+ 
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index c370b2c1c8..868462d1d1 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -534,8 +534,17 @@ static int h264_frame_start(H264Context *h)
+         ret = ff_h264_sl_analysis_alloc(h, pic);
+         if (ret < 0)
+             return ret;
++        ret = ff_h264_sl_stages_alloc(h, pic);
++        if (ret < 0)
++            return ret;
+     } else {
+-        h->sl_analysis_recs = NULL;
++        h->sl_analysis_recs    = NULL;
++        h->sl_stages_pred_y    = NULL;
++        h->sl_stages_pred_cb   = NULL;
++        h->sl_stages_pred_cr   = NULL;
++        h->sl_stages_unfilt_y  = NULL;
++        h->sl_stages_unfilt_cb = NULL;
++        h->sl_stages_unfilt_cr = NULL;
+     }
+ 
+     h->cur_pic_ptr = pic;
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index 24125e8025..5f009493ca 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -157,7 +157,13 @@ void ff_h264_free_tables(H264Context *h)
+     av_freep(&h->mb2b_xy);
+     av_freep(&h->mb2br_xy);
+ 
+-    h->sl_analysis_recs = NULL;
++    h->sl_analysis_recs    = NULL;
++    h->sl_stages_pred_y    = NULL;
++    h->sl_stages_pred_cb   = NULL;
++    h->sl_stages_pred_cr   = NULL;
++    h->sl_stages_unfilt_y  = NULL;
++    h->sl_stages_unfilt_cb = NULL;
++    h->sl_stages_unfilt_cr = NULL;
+ 
+     av_refstruct_pool_uninit(&h->qscale_table_pool);
+     av_refstruct_pool_uninit(&h->mb_type_pool);
+@@ -917,6 +923,72 @@ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
+     return 0;
+ }
+ 
++int ff_h264_sl_stages_alloc(H264Context *h, H264Picture *pic)
++{
++    /* Null out stage pointers first so any early-return leaves them clean. */
++    h->sl_stages_pred_y    = NULL;
++    h->sl_stages_pred_cb   = NULL;
++    h->sl_stages_pred_cr   = NULL;
++    h->sl_stages_unfilt_y  = NULL;
++    h->sl_stages_unfilt_cb = NULL;
++    h->sl_stages_unfilt_cr = NULL;
++
++    /* Only 8-bit is captured (PIXEL_SHIFT==0 path in the template). */
++    if (h->ps.sps && h->ps.sps->bit_depth_luma != 8)
++        return 0;
++
++    const uint32_t width          = pic->mb_width  * 16;
++    const uint32_t height         = pic->mb_height * 16;
++    const uint32_t luma_stride    = width;
++    const uint32_t chroma_stride  = (width  + 1) / 2;
++    const uint32_t chroma_height  = (height + 1) / 2;
++    const uint32_t luma_plane_sz  = luma_stride   * height;
++    const uint32_t chroma_plane_sz = chroma_stride * chroma_height;
++
++    /* Header + 6 planes (pred Y/Cb/Cr + unfilt Y/Cb/Cr). */
++    const size_t hdr_size  = sizeof(SLH264StagesHeader);
++    const size_t blob_size = hdr_size +
++                             2 * (luma_plane_sz + 2 * chroma_plane_sz);
++
++    AVFrameSideData *sd = av_frame_new_side_data(pic->f,
++                                                  AV_FRAME_DATA_SL_H264_STAGES,
++                                                  blob_size);
++    if (!sd)
++        return AVERROR(ENOMEM);
++
++    memset(sd->data, 0, blob_size);
++
++    SLH264StagesHeader *hdr = (SLH264StagesHeader *)sd->data;
++    hdr->version        = SL_H264_STAGES_VERSION;
++    hdr->width          = width;
++    hdr->height         = height;
++    hdr->luma_stride    = luma_stride;
++    hdr->chroma_stride  = chroma_stride;
++    hdr->chroma_height  = chroma_height;
++
++    /* Predicted planes first, then unfiltered. */
++    uint32_t off = (uint32_t)hdr_size;
++    hdr->off_pred_y    = off; off += luma_plane_sz;
++    hdr->off_pred_cb   = off; off += chroma_plane_sz;
++    hdr->off_pred_cr   = off; off += chroma_plane_sz;
++    hdr->off_unfilt_y  = off; off += luma_plane_sz;
++    hdr->off_unfilt_cb = off; off += chroma_plane_sz;
++    hdr->off_unfilt_cr = off; /* final plane, no further offset needed */
++
++    uint8_t *base = sd->data;
++    h->sl_stages_pred_y    = base + hdr->off_pred_y;
++    h->sl_stages_pred_cb   = base + hdr->off_pred_cb;
++    h->sl_stages_pred_cr   = base + hdr->off_pred_cr;
++    h->sl_stages_unfilt_y  = base + hdr->off_unfilt_y;
++    h->sl_stages_unfilt_cb = base + hdr->off_unfilt_cb;
++    h->sl_stages_unfilt_cr = base + hdr->off_unfilt_cr;
++
++    h->sl_stages_luma_stride   = luma_stride;
++    h->sl_stages_chroma_stride = chroma_stride;
++
++    return 0;
++}
++
+ static int output_frame(H264Context *h, AVFrame *dst, H264Picture *srcp)
+ {
+     int ret;
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 475b2b8bab..1fa0a3a9fe 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -597,6 +597,20 @@ typedef struct H264Context {
+      * travels with the picture through the DPB, so reordering is safe.
+      */
+     void *sl_analysis_recs; ///< SLH264MBRecord *, raster indexed
++
++    /**
++     * Pointers into the AV_FRAME_DATA_SL_H264_STAGES pixel planes.
++     * Set by ff_h264_sl_stages_alloc(); NULL when export_sl_analysis is 0
++     * or high-bit-depth / MBAFF.
++     */
++    uint8_t *sl_stages_pred_y;
++    uint8_t *sl_stages_pred_cb;
++    uint8_t *sl_stages_pred_cr;
++    uint8_t *sl_stages_unfilt_y;
++    uint8_t *sl_stages_unfilt_cb;
++    uint8_t *sl_stages_unfilt_cr;
++    uint32_t sl_stages_luma_stride;
++    uint32_t sl_stages_chroma_stride;
+ } H264Context;
+ 
+ extern const uint16_t ff_h264_mb_sizes[4];
+@@ -699,6 +713,15 @@ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup);
+ /** Allocate the SL_H264_ANALYSIS side data blob on pic->f and set h->sl_analysis_recs. */
+ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic);
+ 
++/**
++ * Allocate the SL_H264_STAGES side data blob on pic->f and populate
++ * h->sl_stages_pred_y/cb/cr and h->sl_stages_unfilt_y/cb/cr.
++ * Must be called after ff_h264_sl_analysis_alloc (uses pic dimensions).
++ * Only attaches data for 8-bit progressive streams; for high-bit-depth
++ * or MBAFF the stage pointers are set to NULL and no side data is added.
++ */
++int ff_h264_sl_stages_alloc(H264Context *h, H264Picture *pic);
++
+ int ff_h264_ref_picture(H264Picture *dst, const H264Picture *src);
+ int ff_h264_replace_picture(H264Picture *dst, const H264Picture *src);
+ void ff_h264_unref_picture(H264Picture *pic);
+diff --git a/libavutil/frame.h b/libavutil/frame.h
+index 571411f5ea..cda3459105 100644
+--- a/libavutil/frame.h
++++ b/libavutil/frame.h
+@@ -270,6 +270,17 @@ enum AVFrameSideDataType {
+      * Requires threads=1.
+      */
+     AV_FRAME_DATA_SL_H264_ANALYSIS,
++
++    /**
++     * Streamlens H.264 reconstruction stage planes (predicted + unfiltered).
++     * The payload is a SLH264StagesHeader followed by pixel data for the
++     * predicted and unfiltered (pre-deblock) luma/chroma planes, as defined in
++     * libavutil/sl_h264_analysis.h.
++     * Enabled via the h264 decoder AVOption "export_sl_analysis".
++     * Requires threads=1.  Only progressive (frame_mbs_only) 8-bit streams
++     * are captured; MBAFF planes are zeroed.
++     */
++    AV_FRAME_DATA_SL_H264_STAGES,
+ };
+ 
+ enum AVActiveFormatDescription {
+diff --git a/libavutil/side_data.c b/libavutil/side_data.c
+index 46c43fa5e2..4fac38498b 100644
+--- a/libavutil/side_data.c
++++ b/libavutil/side_data.c
+@@ -58,6 +58,7 @@ static const AVSideDataDescriptor sd_props[] = {
+     [AV_FRAME_DATA_VIDEO_HINT]                  = { "Encoding video hint",                          AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
+     [AV_FRAME_DATA_3D_REFERENCE_DISPLAYS]       = { "3D Reference Displays Information",            AV_SIDE_DATA_PROP_GLOBAL },
+     [AV_FRAME_DATA_SL_H264_ANALYSIS]            = { "Streamlens H.264 per-MB analysis",             AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
++    [AV_FRAME_DATA_SL_H264_STAGES]              = { "Streamlens H.264 stage planes",                AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
+ };
+ 
+ const AVSideDataDescriptor *av_frame_side_data_desc(enum AVFrameSideDataType type)
+diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
+index ed9a4b1807..08d57f0194 100644
+--- a/libavutil/sl_h264_analysis.h
++++ b/libavutil/sl_h264_analysis.h
+@@ -129,4 +129,49 @@ typedef struct SLH264MBRecord {
+     uint32_t bits;    /**< approximate coded bits consumed by this MB (entropy-coder position delta) */
+ } __attribute__((packed)) SLH264MBRecord;
+ 
++/**
++ * Header for AV_FRAME_DATA_SL_H264_STAGES.
++ *
++ * Payload layout (all 8-bit samples, native-endian offsets):
++ *
++ *   SLH264StagesHeader   (fixed, at offset 0)
++ *   uint8_t[luma_stride   * height]          predicted luma   (Y)
++ *   uint8_t[chroma_stride * chroma_height]   predicted Cb
++ *   uint8_t[chroma_stride * chroma_height]   predicted Cr
++ *   uint8_t[luma_stride   * height]          unfiltered luma  (Y)
++ *   uint8_t[chroma_stride * chroma_height]   unfiltered Cb
++ *   uint8_t[chroma_stride * chroma_height]   unfiltered Cr
++ *
++ * chroma_height = (height + 1) / 2  for 4:2:0.
++ * luma_stride   = width  (tightly packed, no alignment padding).
++ * chroma_stride = (width + 1) / 2.
++ *
++ * "predicted"  — pixels after intra prediction / motion compensation but
++ *                BEFORE the IDCT residual add.
++ * "unfiltered" — fully reconstructed pixels BEFORE the deblocking filter
++ *                (same as the final output for skip MBs).
++ *
++ * Only progressive (frame_mbs_only) 8-bit streams are captured.
++ * MBAFF: planes are allocated but samples are zero (not captured).
++ * High bit-depth: not captured (planes are absent / this side data is
++ * not attached).
++ */
++typedef struct SLH264StagesHeader {
++    uint32_t version;        /**< Always 1 */
++    uint32_t width;          /**< Luma width in pixels */
++    uint32_t height;         /**< Luma height in pixels */
++    uint32_t luma_stride;    /**< Bytes between luma rows (== width) */
++    uint32_t chroma_stride;  /**< Bytes between chroma rows (== (width+1)/2) */
++    uint32_t chroma_height;  /**< Chroma plane height (== (height+1)/2) */
++    /* offsets from start of this header to each plane */
++    uint32_t off_pred_y;
++    uint32_t off_pred_cb;
++    uint32_t off_pred_cr;
++    uint32_t off_unfilt_y;
++    uint32_t off_unfilt_cb;
++    uint32_t off_unfilt_cr;
++} __attribute__((packed)) SLH264StagesHeader;
++
++#define SL_H264_STAGES_VERSION 1
++
+ #endif /* AVUTIL_SL_H264_ANALYSIS_H */
+-- 
+2.39.5 (Apple Git-154)
+

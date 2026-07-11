@@ -1,0 +1,696 @@
+From b68936cfe70fb4728f81f05521ffe18076843ff0 Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Mon, 6 Jul 2026 22:44:10 +0200
+Subject: [PATCH 1/3] feat: port YUView internals analytics API +
+ de265_internals_get_CB_QP
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ports the per-picture analytics API from the ChristianFeldmann/libde265
+internal branch onto mainline v1.1.1:
+
+- de265_internals.h / .cc: C-linkage externals for CTB slice indices,
+  CB info (log2sz/partmode/predmode/PCM/transquant-bypass), PB motion
+  vectors + refPOCs, intra direction (luma + chroma), TU flags, and new
+  de265_internals_get_CB_QP (per min-CB QP_Y on the CB grid).
+- de265_image: adds pixels_prediction/residual/tr_coeff + confwin
+  counterparts, alloc_internals_planes() / release_internals_planes(),
+  and the internals_get_* member functions that access the now-private
+  metadata arrays directly.
+- decoder_context: adds param_internals_save_prediction / _residual /
+  _tr_coeff booleans; alloc_image hooks them to allocate extra planes.
+- CMakeLists: adds de265_internals.cc to sources; de265_internals.h to
+  public headers so it installs alongside de265.h.
+
+Adaptation notes vs. the fork:
+- No decctx-multilayer; casts to decoder_context* directly, same as
+  de265.cc.
+- Prediction/residual/tr_coeff planes are allocated (zero-filled) but
+  not written by the decoder — mainline never saves the pre-SAO signal.
+  The pointers are non-null and have correct stride; pixel data is all
+  zeros. Writing the actual signals requires transform.cc/sao.cc hooks
+  not present in mainline (out of scope for this port).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libde265/CMakeLists.txt     |   2 +
+ libde265/de265_internals.cc | 172 ++++++++++++++++++++++++++++++++++++
+ libde265/de265_internals.h  | 165 ++++++++++++++++++++++++++++++++++
+ libde265/decctx.h           |   5 ++
+ libde265/image.cc           |  88 ++++++++++++++++++
+ libde265/image.h            | 131 +++++++++++++++++++++++++++
+ 6 files changed, 563 insertions(+)
+ create mode 100644 libde265/de265_internals.cc
+ create mode 100644 libde265/de265_internals.h
+
+diff --git a/libde265/CMakeLists.txt b/libde265/CMakeLists.txt
+index c22f48a9..eea8ff75 100644
+--- a/libde265/CMakeLists.txt
++++ b/libde265/CMakeLists.txt
+@@ -6,6 +6,7 @@ set (libde265_sources
+   cabac.cc
+   contextmodel.cc
+   de265.cc
++  de265_internals.cc
+   deblock.cc
+   decctx.cc
+   dpb.cc
+@@ -77,6 +78,7 @@ set (libde265_headers
+ 
+ set (libde265_public_headers
+   de265.h
++  de265_internals.h
+   ${CMAKE_CURRENT_BINARY_DIR}/de265-version.h
+ )
+ 
+diff --git a/libde265/de265_internals.cc b/libde265/de265_internals.cc
+new file mode 100644
+index 00000000..93c13993
+--- /dev/null
++++ b/libde265/de265_internals.cc
+@@ -0,0 +1,172 @@
++/*
++ * H.265 video codec.
++ * Copyright (c) 2013-2014 struktur AG, Dirk Farin <farin@struktur.de>
++ *
++ * libde265 internals analytics API — streamlens port.
++ * Original: https://github.com/ChristianFeldmann/libde265/tree/internal
++ * Adapted for mainline v1.1.x by the streamlens project.
++ *
++ * This file is part of libde265.
++ *
++ * libde265 is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * libde265 is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with libde265.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "de265_internals.h"
++#include "image.h"
++#include "decctx.h"
++
++#include <assert.h>
++
++
++LIBDE265_API void de265_internals_set_parameter_bool(de265_decoder_context* de265ctx,
++                                                     enum de265_internals_param param,
++                                                     int value)
++{
++  decoder_context* ctx = reinterpret_cast<decoder_context*>(de265ctx);
++  switch (param) {
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_PREDICTION:
++      ctx->param_internals_save_prediction = (value != 0);
++      break;
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_RESIDUAL:
++      ctx->param_internals_save_residual = (value != 0);
++      break;
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF:
++      ctx->param_internals_save_tr_coeff = (value != 0);
++      break;
++    default:
++      assert(false);
++      break;
++  }
++}
++
++
++LIBDE265_API const uint8_t* de265_internals_get_image_plane(const struct de265_image* img,
++                                                            enum de265_internals_param signal,
++                                                            int channel,
++                                                            int* out_stride)
++{
++  assert(channel >= 0 && channel <= 2);
++
++  const uint8_t* data = nullptr;
++  switch (signal) {
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_PREDICTION:
++      data = img->pixels_confwin_prediction[channel];
++      break;
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_RESIDUAL:
++      data = img->pixels_confwin_residual[channel];
++      break;
++    case DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF:
++      data = img->pixels_confwin_tr_coeff[channel];
++      break;
++    default:
++      assert(false);
++      break;
++  }
++
++  if (out_stride) {
++    *out_stride = (int)(img->get_image_stride(channel) *
++                        ((de265_get_bits_per_pixel(img, channel) + 7) / 8));
++  }
++  return data;
++}
++
++
++LIBDE265_API void de265_internals_get_CTB_Info_Layout(const struct de265_image* img,
++                                                      int* widthInUnits,
++                                                      int* heightInUnits,
++                                                      int* log2UnitSize)
++{
++  img->internals_get_CTB_Info_Layout(widthInUnits, heightInUnits, log2UnitSize);
++}
++
++
++LIBDE265_API void de265_internals_get_CTB_sliceIdx(const struct de265_image* img,
++                                                   uint16_t* idxArray)
++{
++  img->internals_get_sliceIdx(idxArray);
++}
++
++
++LIBDE265_API void de265_internals_get_CB_Info_Layout(const struct de265_image* img,
++                                                     int* widthInUnits,
++                                                     int* heightInUnits,
++                                                     int* log2UnitSize)
++{
++  img->internals_get_CB_Info_Layout(widthInUnits, heightInUnits, log2UnitSize);
++}
++
++
++LIBDE265_API void de265_internals_get_CB_info(const struct de265_image* img,
++                                              uint16_t* idxArray)
++{
++  img->internals_get_CB_info(idxArray);
++}
++
++
++LIBDE265_API void de265_internals_get_CB_QP(const struct de265_image* img,
++                                            int8_t* qpArray)
++{
++  img->internals_get_CB_QP(qpArray);
++}
++
++
++LIBDE265_API void de265_internals_get_PB_Info_layout(const struct de265_image* img,
++                                                     int* widthInUnits,
++                                                     int* heightInUnits,
++                                                     int* log2UnitSize)
++{
++  img->internals_get_PB_Info_layout(widthInUnits, heightInUnits, log2UnitSize);
++}
++
++
++LIBDE265_API void de265_internals_get_PB_info(const struct de265_image* img,
++                                              int16_t* refPOC0, int16_t* refPOC1,
++                                              int16_t* x0, int16_t* y0,
++                                              int16_t* x1, int16_t* y1)
++{
++  img->internals_get_PB_info(refPOC0, refPOC1, x0, y0, x1, y1);
++}
++
++
++LIBDE265_API void de265_internals_get_IntraDir_Info_layout(const struct de265_image* img,
++                                                           int* widthInUnits,
++                                                           int* heightInUnits,
++                                                           int* log2UnitSize)
++{
++  img->internals_get_IntraDir_Info_Layer(widthInUnits, heightInUnits, log2UnitSize);
++}
++
++
++LIBDE265_API void de265_internals_get_intraDir_info(const struct de265_image* img,
++                                                    uint8_t* intraDir,
++                                                    uint8_t* intraDirChroma)
++{
++  img->internals_get_intraDir_info(intraDir, intraDirChroma);
++}
++
++
++LIBDE265_API void de265_internals_get_TUInfo_Info_layout(const struct de265_image* img,
++                                                         int* widthInUnits,
++                                                         int* heightInUnits,
++                                                         int* log2UnitSize)
++{
++  img->internals_get_TUInfo_Info_layout(widthInUnits, heightInUnits, log2UnitSize);
++}
++
++
++LIBDE265_API void de265_internals_get_TUInfo_info(const struct de265_image* img,
++                                                  uint8_t* tuInfo)
++{
++  img->internals_get_TUInfo_info(tuInfo);
++}
+diff --git a/libde265/de265_internals.h b/libde265/de265_internals.h
+new file mode 100644
+index 00000000..0af63305
+--- /dev/null
++++ b/libde265/de265_internals.h
+@@ -0,0 +1,165 @@
++/*
++ * H.265 video codec.
++ * Copyright (c) 2013-2014 struktur AG, Dirk Farin <farin@struktur.de>
++ *
++ * libde265 internals analytics API — streamlens port.
++ * Original: https://github.com/ChristianFeldmann/libde265/tree/internal
++ * Adapted for mainline v1.1.x by the streamlens project.
++ *
++ * This file is part of libde265.
++ *
++ * libde265 is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * libde265 is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with libde265.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef DE265_INTERNALS_H
++#define DE265_INTERNALS_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include "libde265/de265.h"
++
++/* Decoder params that enable saving of extra signal planes. */
++enum de265_internals_param {
++  DE265_INTERNALS_DECODER_PARAM_SAVE_PREDICTION = 0,
++  DE265_INTERNALS_DECODER_PARAM_SAVE_RESIDUAL,
++  DE265_INTERNALS_DECODER_PARAM_SAVE_TR_COEFF
++};
++
++/*
++ * Enable/disable saving of prediction / residual / transform-coefficient planes.
++ * Must be called BEFORE decoding starts (before any pictures are decoded).
++ */
++LIBDE265_API void de265_internals_set_parameter_bool(de265_decoder_context*,
++                                                     enum de265_internals_param param,
++                                                     int value);
++
++/*
++ * Retrieve a saved auxiliary image plane.
++ * signal: which plane (SAVE_PREDICTION / SAVE_RESIDUAL / SAVE_TR_COEFF)
++ * channel: 0=luma, 1=Cb, 2=Cr
++ * out_stride: set to bytes-per-row (stride * bytes-per-sample)
++ * Returns NULL if the plane was not saved.
++ */
++LIBDE265_API const uint8_t* de265_internals_get_image_plane(const struct de265_image* img,
++                                                            enum de265_internals_param signal,
++                                                            int channel,
++                                                            int* out_stride);
++
++/*
++ * CTB grid layout.
++ * Grid unit = 1 CTB.  Units per row = ceil(width / CTB_size).
++ */
++LIBDE265_API void de265_internals_get_CTB_Info_Layout(const struct de265_image* img,
++                                                      int* widthInUnits,
++                                                      int* heightInUnits,
++                                                      int* log2UnitSize);
++
++/*
++ * Per-CTB slice index (SliceAddrRS).
++ * idxArray must hold widthInUnits * heightInUnits elements (uint16_t).
++ */
++LIBDE265_API void de265_internals_get_CTB_sliceIdx(const struct de265_image* img,
++                                                   uint16_t* idxArray);
++
++/*
++ * CB grid layout.
++ * Grid unit = 1 min-CB (side = 1 << log2UnitSize).
++ */
++LIBDE265_API void de265_internals_get_CB_Info_Layout(const struct de265_image* img,
++                                                     int* widthInUnits,
++                                                     int* heightInUnits,
++                                                     int* log2UnitSize);
++
++/*
++ * Per min-CB packed info word (uint16_t):
++ *   bits 0:2  log2CbSize  (non-zero only at top-left of CB)
++ *   bits 3:5  PartMode
++ *   bits 6:7  PredMode  (0=INTRA, 1=INTER, 2=SKIP)
++ *   bit  8    pcm_flag
++ *   bit  9    cu_transquant_bypass
++ * idxArray: widthInUnits * heightInUnits elements.
++ */
++LIBDE265_API void de265_internals_get_CB_info(const struct de265_image* img,
++                                              uint16_t* idxArray);
++
++/*
++ * Per min-CB QP_Y (int8_t, range [0,51]).
++ * Same grid convention as get_CB_info.
++ * idxArray: widthInUnits * heightInUnits elements.
++ */
++LIBDE265_API void de265_internals_get_CB_QP(const struct de265_image* img,
++                                            int8_t* qpArray);
++
++/*
++ * PB grid layout.
++ * Grid unit = 1 min-PU (side = 1 << log2UnitSize, typically 4 pixels).
++ */
++LIBDE265_API void de265_internals_get_PB_Info_layout(const struct de265_image* img,
++                                                     int* widthInUnits,
++                                                     int* heightInUnits,
++                                                     int* log2UnitSize);
++
++/*
++ * Per min-PU motion info.
++ * refPOC0/1: reference POC for list 0 / list 1; -1 = list not used.
++ * x0/y0, x1/y1: motion vector for list 0 / list 1 (in 1/4-pel units).
++ * All arrays: widthInUnits * heightInUnits elements.
++ */
++LIBDE265_API void de265_internals_get_PB_info(const struct de265_image* img,
++                                              int16_t* refPOC0, int16_t* refPOC1,
++                                              int16_t* x0, int16_t* y0,
++                                              int16_t* x1, int16_t* y1);
++
++/*
++ * IntraDir grid layout (same grid as PB, log2UnitSize = Log2MinPUSize).
++ */
++LIBDE265_API void de265_internals_get_IntraDir_Info_layout(const struct de265_image* img,
++                                                           int* widthInUnits,
++                                                           int* heightInUnits,
++                                                           int* log2UnitSize);
++
++/*
++ * Per min-PU intra prediction direction.
++ * intraDir: luma direction [0,34].
++ * intraDirChroma: chroma direction (lower 6 bits) + mode4 flag (bit 7).
++ * Both arrays: widthInUnits * heightInUnits elements.
++ */
++LIBDE265_API void de265_internals_get_intraDir_info(const struct de265_image* img,
++                                                    uint8_t* intraDir,
++                                                    uint8_t* intraDirChroma);
++
++/*
++ * TU grid layout (log2UnitSize = Log2MinTrafoSize).
++ */
++LIBDE265_API void de265_internals_get_TUInfo_Info_layout(const struct de265_image* img,
++                                                         int* widthInUnits,
++                                                         int* heightInUnits,
++                                                         int* log2UnitSize);
++
++/*
++ * Per min-TU info byte:
++ *   bits 0:4  split_transform_flag depth mask (bit k = split at depth k)
++ *   bit  7    TU_FLAG_NONZERO_COEFF
++ * tuInfo: widthInUnits * heightInUnits elements.
++ */
++LIBDE265_API void de265_internals_get_TUInfo_info(const struct de265_image* img,
++                                                  uint8_t* tuInfo);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DE265_INTERNALS_H */
+diff --git a/libde265/decctx.h b/libde265/decctx.h
+index 6a8a8461..964e6d65 100644
+--- a/libde265/decctx.h
++++ b/libde265/decctx.h
+@@ -356,6 +356,11 @@ class decoder_context : public base_context {
+   //bool param_disable_mc_residual_idct;  // not implemented yet
+   //bool param_disable_intra_residual_idct;  // not implemented yet
+ 
++  // internals analytics (streamlens port)
++  bool param_internals_save_prediction = false;
++  bool param_internals_save_residual   = false;
++  bool param_internals_save_tr_coeff  = false;
++
+   de265_security_limits param_security_limits = {
+     1,                // version
+     8192 * 8192,      // max_image_size_pixels
+diff --git a/libde265/image.cc b/libde265/image.cc
+index 82078e66..765d0dc4 100644
+--- a/libde265/image.cc
++++ b/libde265/image.cc
+@@ -194,6 +194,81 @@ void de265_image::set_image_plane(int cIdx, uint8_t* mem, ptrdiff_t stride, void
+ }
+ 
+ 
++void de265_image::alloc_internals_planes(bool save_prediction, bool save_residual, bool save_tr_coeff)
++{
++  // luma: stride * height bytes (already set from main allocation)
++  size_t luma_bytes   = static_cast<size_t>(stride)        * height        * ((BitDepth_Y+7)/8) + MEMORY_PADDING;
++  size_t chroma_bytes = static_cast<size_t>(chroma_stride) * chroma_height * ((BitDepth_C+7)/8) + MEMORY_PADDING;
++
++  bool mono = (chroma_format == de265_chroma_mono);
++
++  struct PlaneSet {
++    uint8_t** raw;
++    uint8_t** confwin;
++    bool       enabled;
++  } sets[3] = {
++    { pixels_prediction, pixels_confwin_prediction, save_prediction },
++    { pixels_residual,   pixels_confwin_residual,   save_residual   },
++    { pixels_tr_coeff,   pixels_confwin_tr_coeff,   save_tr_coeff   },
++  };
++
++  // conformance window offsets (pixel units per channel)
++  int sps_left   = sps ? sps->conf_win_left_offset   : 0;
++  int sps_top    = sps ? sps->conf_win_top_offset     : 0;
++  uint8_t WinUnitX = SubWidthC, WinUnitY = SubHeightC;
++
++  for (auto& s : sets) {
++    if (!s.enabled) {
++      for (int c = 0; c < 3; c++) { s.raw[c] = nullptr; s.confwin[c] = nullptr; }
++      continue;
++    }
++    s.raw[0] = static_cast<uint8_t*>(ALLOC_ALIGNED_16(luma_bytes));
++    if (s.raw[0]) memset(s.raw[0], 0, luma_bytes);
++
++    if (!mono) {
++      s.raw[1] = static_cast<uint8_t*>(ALLOC_ALIGNED_16(chroma_bytes));
++      s.raw[2] = static_cast<uint8_t*>(ALLOC_ALIGNED_16(chroma_bytes));
++      if (s.raw[1]) memset(s.raw[1], 0, chroma_bytes);
++      if (s.raw[2]) memset(s.raw[2], 0, chroma_bytes);
++    } else {
++      s.raw[1] = nullptr;
++      s.raw[2] = nullptr;
++    }
++
++    // set confwin pointers
++    int bpp_y = (BitDepth_Y+7)/8;
++    int bpp_c = (BitDepth_C+7)/8;
++    if (s.raw[0])
++      s.confwin[0] = s.raw[0] + (sps_left*WinUnitX + sps_top*WinUnitY*(int)stride) * bpp_y;
++    else
++      s.confwin[0] = nullptr;
++
++    for (int c = 1; c < 3; c++) {
++      if (s.raw[c])
++        s.confwin[c] = s.raw[c] + (sps_left + sps_top*(int)chroma_stride) * bpp_c;
++      else
++        s.confwin[c] = nullptr;
++    }
++  }
++}
++
++
++void de265_image::release_internals_planes()
++{
++  for (int c = 0; c < 3; c++) {
++    FREE_ALIGNED(pixels_prediction[c]);
++    FREE_ALIGNED(pixels_residual[c]);
++    FREE_ALIGNED(pixels_tr_coeff[c]);
++    pixels_prediction[c]         = nullptr;
++    pixels_confwin_prediction[c] = nullptr;
++    pixels_residual[c]           = nullptr;
++    pixels_confwin_residual[c]   = nullptr;
++    pixels_tr_coeff[c]           = nullptr;
++    pixels_confwin_tr_coeff[c]   = nullptr;
++  }
++}
++
++
+ de265_image::de265_image() = default;
+ 
+ 
+@@ -442,6 +517,17 @@ de265_error de265_image::alloc_image(int w,int h, enum de265_chroma c,
+       }
+   }
+ 
++  // allocate internals analytics planes if requested
++  if (decctx &&
++      (decctx->param_internals_save_prediction ||
++       decctx->param_internals_save_residual   ||
++       decctx->param_internals_save_tr_coeff))
++  {
++    alloc_internals_planes(decctx->param_internals_save_prediction,
++                           decctx->param_internals_save_residual,
++                           decctx->param_internals_save_tr_coeff);
++  }
++
+   return DE265_OK;
+ }
+ 
+@@ -483,6 +569,8 @@ void de265_image::release()
+         }
+     }
+ 
++  release_internals_planes();
++
+   // free slices
+ 
+   for (size_t i=0;i<slices.size();i++) {
+diff --git a/libde265/image.h b/libde265/image.h
+index 114f41e4..1c225f59 100644
+--- a/libde265/image.h
++++ b/libde265/image.h
+@@ -350,6 +350,15 @@ public:
+   int width_confwin = 0, height_confwin = 0;
+   int chroma_width_confwin = 0, chroma_height_confwin = 0;
+ 
++  // --- internals analytics planes (streamlens port) ---
++  // Allocated lazily by alloc_internals_planes(); nullptr when not requested.
++  uint8_t* pixels_prediction[3]         = { nullptr, nullptr, nullptr };
++  uint8_t* pixels_confwin_prediction[3] = { nullptr, nullptr, nullptr };
++  uint8_t* pixels_residual[3]           = { nullptr, nullptr, nullptr };
++  uint8_t* pixels_confwin_residual[3]   = { nullptr, nullptr, nullptr };
++  uint8_t* pixels_tr_coeff[3]           = { nullptr, nullptr, nullptr };
++  uint8_t* pixels_confwin_tr_coeff[3]   = { nullptr, nullptr, nullptr };
++
+   // --- decoding info ---
+ 
+   // If PicOutputFlag==false && PicState==UnusedForReference, image buffer is free.
+@@ -854,6 +863,128 @@ public:
+   // --- value logging ---
+ 
+   void printBlk(int x0,int y0, int cIdx, int log2BlkSize);
++
++  // --- internals analytics (streamlens port) ---
++
++  // Allocate prediction/residual/tr_coeff planes according to decoder params.
++  // Must be called after the main image allocation (pixels[] and strides set).
++  void alloc_internals_planes(bool save_prediction, bool save_residual, bool save_tr_coeff);
++
++  // Release internals planes (called from release()).
++  void release_internals_planes();
++
++  void internals_get_CTB_Info_Layout(int *widthInUnits, int *heightInUnits, int *log2UnitSize) const
++  {
++    *widthInUnits  = ctb_info.width_in_units;
++    *heightInUnits = ctb_info.height_in_units;
++    *log2UnitSize  = ctb_info.log2unitSize;
++  }
++
++  void internals_get_sliceIdx(uint16_t *idxArray) const
++  {
++    for (int i = 0; i < ctb_info.size(); i++) {
++      idxArray[i] = ctb_info[i].SliceAddrRS;
++    }
++  }
++
++  void internals_get_CB_Info_Layout(int *widthInUnits, int *heightInUnits, int *log2UnitSize) const
++  {
++    *widthInUnits  = cb_info.width_in_units;
++    *heightInUnits = cb_info.height_in_units;
++    *log2UnitSize  = cb_info.log2unitSize;
++  }
++
++  void internals_get_CB_info(uint16_t *idxArray) const
++  {
++    for (int i = 0; i < cb_info.size(); i++) {
++      const CB_ref_info& cb = cb_info[i];
++      uint16_t v = 0;
++      v  = static_cast<uint16_t>(cb.log2CbSize & 0x7);        // bits 0:2
++      v |= static_cast<uint16_t>((cb.PartMode  & 0x7) << 3);  // bits 3:5
++      v |= static_cast<uint16_t>((cb.PredMode  & 0x3) << 6);  // bits 6:7
++      if (cb.pcm_flag)              v |= (1 << 8);             // bit 8
++      if (cb.cu_transquant_bypass)  v |= (1 << 9);             // bit 9
++      idxArray[i] = v;
++    }
++  }
++
++  void internals_get_CB_QP(int8_t *qpArray) const
++  {
++    for (int i = 0; i < cb_info.size(); i++) {
++      qpArray[i] = cb_info[i].QP_Y;
++    }
++  }
++
++  void internals_get_PB_Info_layout(int *widthInUnits, int *heightInUnits, int *log2UnitSize) const
++  {
++    *widthInUnits  = pb_info.width_in_units;
++    *heightInUnits = pb_info.height_in_units;
++    *log2UnitSize  = pb_info.log2unitSize;
++  }
++
++  void internals_get_PB_info(int16_t *refPOC0, int16_t *refPOC1,
++                              int16_t *x0, int16_t *y0,
++                              int16_t *x1, int16_t *y1) const
++  {
++    for (int i = 0; i < pb_info.size(); i++) {
++      const PBMotion& mv = pb_info[i];
++      int pbSizePix = (1 << pb_info.log2unitSize);
++      int iXPix = (i % pb_info.width_in_units) * pbSizePix;
++      int iYPix = (i / pb_info.width_in_units) * pbSizePix;
++
++      int shdr_idx = get_SliceHeaderIndex(iXPix, iYPix);
++      int rPOC[2] = {0, 0};
++      if (shdr_idx < (int)slices.size()) {
++        const slice_segment_header* shdr = slices[shdr_idx];
++        if (mv.refIdx[0] < 16) rPOC[0] = shdr->RefPicList_POC[0][mv.refIdx[0]];
++        if (mv.refIdx[1] < 16) rPOC[1] = shdr->RefPicList_POC[1][mv.refIdx[1]];
++      }
++
++      if (mv.predFlag[0] != 1) {
++        refPOC0[i] = -1; x0[i] = 0; y0[i] = 0;
++      } else {
++        refPOC0[i] = static_cast<int16_t>(rPOC[0]);
++        x0[i] = mv.mv[0].x;
++        y0[i] = mv.mv[0].y;
++      }
++      if (mv.predFlag[1] != 1) {
++        refPOC1[i] = -1; x1[i] = 0; y1[i] = 0;
++      } else {
++        refPOC1[i] = static_cast<int16_t>(rPOC[1]);
++        x1[i] = mv.mv[1].x;
++        y1[i] = mv.mv[1].y;
++      }
++    }
++  }
++
++  void internals_get_IntraDir_Info_Layer(int *widthInUnits, int *heightInUnits, int *log2UnitSize) const
++  {
++    *widthInUnits  = intraPredMode.width_in_units;
++    *heightInUnits = intraPredMode.height_in_units;
++    *log2UnitSize  = intraPredMode.log2unitSize;
++  }
++
++  void internals_get_intraDir_info(uint8_t *intraDir, uint8_t *intraDirChroma) const
++  {
++    for (int i = 0; i < intraPredMode.size(); i++) {
++      intraDir[i]      = intraPredMode[i];
++      intraDirChroma[i]= intraPredModeC[i];
++    }
++  }
++
++  void internals_get_TUInfo_Info_layout(int *widthInUnits, int *heightInUnits, int *log2UnitSize) const
++  {
++    *widthInUnits  = tu_info.width_in_units;
++    *heightInUnits = tu_info.height_in_units;
++    *log2UnitSize  = tu_info.log2unitSize;
++  }
++
++  void internals_get_TUInfo_info(uint8_t *tuInfo) const
++  {
++    for (int i = 0; i < tu_info.size(); i++) {
++      tuInfo[i] = tu_info[i];
++    }
++  }
+ };
+ 
+ 
+-- 
+2.39.5 (Apple Git-154)
+

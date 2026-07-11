@@ -1,0 +1,68 @@
+From bd813ec60582b4594f51e0660c0bbfec9107886b Mon Sep 17 00:00:00 2001
+From: Axel Tobieson <axel.tobieson@spiideo.com>
+Date: Tue, 7 Jul 2026 14:24:26 +0200
+Subject: [PATCH 4/6] feat: gate stage-plane export behind export_sl_stages
+ option
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ libavcodec/h264_slice.c | 15 ++++++++++++---
+ libavcodec/h264dec.c    |  1 +
+ libavcodec/h264dec.h    |  3 +++
+ 3 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index 868462d1d1..990584c4bb 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -534,9 +534,18 @@ static int h264_frame_start(H264Context *h)
+         ret = ff_h264_sl_analysis_alloc(h, pic);
+         if (ret < 0)
+             return ret;
+-        ret = ff_h264_sl_stages_alloc(h, pic);
+-        if (ret < 0)
+-            return ret;
++        if (h->export_sl_stages) {
++            ret = ff_h264_sl_stages_alloc(h, pic);
++            if (ret < 0)
++                return ret;
++        } else {
++            h->sl_stages_pred_y    = NULL;
++            h->sl_stages_pred_cb   = NULL;
++            h->sl_stages_pred_cr   = NULL;
++            h->sl_stages_unfilt_y  = NULL;
++            h->sl_stages_unfilt_cb = NULL;
++            h->sl_stages_unfilt_cr = NULL;
++        }
+     } else {
+         h->sl_analysis_recs    = NULL;
+         h->sl_stages_pred_y    = NULL;
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index 5f009493ca..ad977e42f7 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -1233,6 +1233,7 @@ static const AVOption h264_options[] = {
+     { "skip_gray", "Do not return gray gap frames", OFFSET(skip_gray), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "noref_gray", "Avoid using gray gap frames as references", OFFSET(noref_gray), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, VD },
+     { "export_sl_analysis", "Export Streamlens per-MB analysis side data (requires threads=1)", OFFSET(export_sl_analysis), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
++    { "export_sl_stages", "Also export predicted/unfiltered stage planes (needs export_sl_analysis)", OFFSET(export_sl_stages), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { NULL },
+ };
+ 
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 1fa0a3a9fe..d7103fcbb9 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -587,6 +587,9 @@ typedef struct H264Context {
+ 
+     /** Streamlens: export per-MB analysis side data (AVOption "export_sl_analysis") */
+     int export_sl_analysis;
++    /** Streamlens: also export predicted/unfiltered stage planes (AVOption
++     *  "export_sl_stages"; costs ~2 frame copies per picture). */
++    int export_sl_stages;
+     /**
+      * Pointer into the AV_FRAME_DATA_SL_H264_ANALYSIS side data allocated on
+      * h->cur_pic_ptr->f at frame start.  Points at the first SLH264MBRecord
+-- 
+2.39.5 (Apple Git-154)
+
