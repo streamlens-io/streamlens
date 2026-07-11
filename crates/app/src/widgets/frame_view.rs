@@ -274,13 +274,32 @@ where
     fn mouse_interaction(
         &self,
         state: &Self::State,
-        _bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
     ) -> mouse::Interaction {
+        // Non-interactive views (block magnifier) keep the normal cursor.
+        if !self.interactive {
+            return mouse::Interaction::default();
+        }
         if state.drag.is_some() {
-            mouse::Interaction::Grabbing
-        } else {
+            return mouse::Interaction::Grabbing;
+        }
+        // Crosshair only over the picture itself; letterboxing around it
+        // is not inspectable and keeps the default cursor.
+        let over_image = self.frame.is_some_and(|frame| {
+            let Some(pos) = cursor.position_in(bounds) else {
+                return false;
+            };
+            let image = (frame.image.width as f32, frame.image.height as f32);
+            let (zoom, center) =
+                effective_view(self.zoom, self.center, image, (bounds.width, bounds.height));
+            let (px, py) = widget_to_image(zoom, center, bounds, (pos.x, pos.y));
+            px >= 0.0 && py >= 0.0 && px < image.0 && py < image.1
+        });
+        if over_image {
             mouse::Interaction::Crosshair
+        } else {
+            mouse::Interaction::default()
         }
     }
 }

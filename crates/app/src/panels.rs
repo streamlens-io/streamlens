@@ -49,15 +49,15 @@ impl Tab {
 }
 
 pub fn tab_bar(active: Tab) -> Element<'static, Message> {
-    let mut bar = row![].spacing(1);
+    let mut bar = row![].spacing(2);
     for tab in Tab::ALL {
-        let mut b = button(text(tab.label()).size(11)).padding([2, 5]);
-        if tab != active {
-            b = b.style(button::secondary);
-        }
-        bar = bar.push(b.on_press(Message::SelectTab(tab)));
+        bar = bar.push(theme::chip(
+            tab.label(),
+            tab == active,
+            Message::SelectTab(tab),
+        ));
     }
-    container(bar).padding(3).into()
+    container(bar).padding(4).into()
 }
 
 /// Stream Viewer: AU/NAL inventory around the current frame, synced to it.
@@ -237,69 +237,77 @@ pub fn block_view<'a>(
     };
 
     let unit = if a.superblock_size == 16 { "MB" } else { "CTU" };
-    let mut col = column![text(format!(
-        "{unit} @ ({}, {}) — slice {}, tile {}",
-        sb.rect.x, sb.rect.y, sb.slice_index, sb.tile_index
-    ))
-    .size(13),]
-    .spacing(3);
+    let mut col = column![
+        text(format!("{unit} @ ({}, {})", sb.rect.x, sb.rect.y))
+            .size(12)
+            .font(iced::Font::MONOSPACE),
+        theme::kv(
+            "Slice / tile",
+            format!("{} / {}", sb.slice_index, sb.tile_index)
+        ),
+    ]
+    .spacing(4);
 
     let Some(cu) = a.cus_of(sb).iter().find(|cu| cu.rect.contains(x, y)) else {
-        return scrollable(col.padding(10)).into();
+        return scrollable(col.padding(12)).into();
     };
 
     col = col.push(text("").size(4));
-    col = col.push(text("Coding unit").size(13));
     col = col.push(
-        text(format!(
+        row![
+            theme::section("Coding unit"),
+            theme::badge(format!("{:?}", cu.pred), pred_mode_color(cu.pred))
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    );
+    col = col.push(theme::kv(
+        "CU",
+        format!(
             "{}×{} @ ({}, {}), depth {}",
             cu.rect.w, cu.rect.h, cu.rect.x, cu.rect.y, cu.depth
-        ))
-        .size(12),
-    );
-    col = col.push(text(format!("Mode: {:?}   QP: {}", cu.pred, cu.qp)).size(12));
+        ),
+    ));
+    col = col.push(theme::kv("QP", cu.qp.to_string()));
     if let Some(bits) = cu.bits {
-        col = col.push(text(format!("Bits: {}", bits.total)).size(12));
+        col = col.push(theme::kv("Bits", bits.total.to_string()));
     }
 
     for (i, pu) in a.pus_of(cu).iter().enumerate() {
         col = col.push(text("").size(4));
-        col = col.push(
-            text(format!(
-                "PU {i}: {}×{} @ ({}, {})",
+        col = col.push(theme::kv(
+            "PU",
+            format!(
+                "{i} · {}×{} @ ({}, {})",
                 pu.rect.w, pu.rect.h, pu.rect.x, pu.rect.y
-            ))
-            .size(12),
-        );
+            ),
+        ));
         if let Some(intra) = &pu.intra {
-            col = col.push(
-                text(format!(
-                    "  intra luma mode {} / chroma {}",
-                    intra.luma_mode, intra.chroma_mode
-                ))
-                .size(12),
-            );
+            col = col.push(theme::kv(
+                "Intra",
+                format!("luma {} / chroma {}", intra.luma_mode, intra.chroma_mode),
+            ));
         }
         if let Some(inter) = &pu.inter {
             for list in 0..2 {
                 if let Some(mv) = inter.mv[list] {
                     let refinfo = match (inter.ref_poc[list], inter.ref_idx[list]) {
-                        (Some(poc), _) => format!("→ POC {poc}"),
-                        (None, Some(idx)) => format!("ref_idx {idx}"),
+                        (Some(poc), _) => format!(" → POC {poc}"),
+                        (None, Some(idx)) => format!(" ref_idx {idx}"),
                         _ => String::new(),
                     };
-                    col = col.push(
-                        text(format!(
-                            "  L{list}: ({:+.2}, {:+.2}) px {refinfo}",
+                    col = col.push(theme::kv(
+                        if list == 0 { "L0" } else { "L1" },
+                        format!(
+                            "({:+.2}, {:+.2}) px{refinfo}",
                             mv.x as f32 / 4.0,
                             mv.y as f32 / 4.0
-                        ))
-                        .size(12),
-                    );
+                        ),
+                    ));
                 }
             }
             if let Some(merge) = inter.merge {
-                col = col.push(text(format!("  merge idx {merge}")).size(12));
+                col = col.push(theme::kv("Merge idx", merge.to_string()));
             }
         }
     }
@@ -312,11 +320,11 @@ pub fn block_view<'a>(
             None => "—", // decoder doesn't report chroma cbf
         };
         col = col.push(text("").size(4));
-        col = col.push(text(format!("Transform units: {}", tus.len())).size(12));
+        col = col.push(theme::section(&format!("Transform units · {}", tus.len())));
         for tu in tus.iter().take(16) {
             col = col.push(
                 text(format!(
-                    "  {}×{} @ ({}, {}) depth {} cbf(y/cb/cr): {}/{}/{}",
+                    "{}×{} @ ({}, {}) d{} cbf {}/{}/{}",
                     tu.rect.w,
                     tu.rect.h,
                     tu.rect.x,
@@ -326,12 +334,14 @@ pub fn block_view<'a>(
                     cbf(tu.cbf_cb),
                     cbf(tu.cbf_cr)
                 ))
-                .size(11),
+                .size(11)
+                .font(iced::Font::MONOSPACE)
+                .color(theme::DIM),
             );
         }
     }
 
-    scrollable(col.padding(10)).width(Fill).height(Fill).into()
+    scrollable(col.padding(12)).width(Fill).height(Fill).into()
 }
 
 /// Category label color for statistics sections.

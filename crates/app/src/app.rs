@@ -16,6 +16,7 @@ use streamlens_core::{DecodedFrame, StreamIndex, SweepFrame};
 use streamlens_types::FrameType;
 
 use crate::panels::{self, Tab};
+use crate::theme;
 use crate::widgets::barchart::{self, BarChart, ChartOrder};
 use crate::widgets::frame_view::{self, ChannelMode, ColorMatrix, FrameView, Zoom};
 use crate::widgets::overlays::{self, Glyph, OverlaySettings, Segment};
@@ -909,6 +910,7 @@ impl App {
 
         let mut root = column![
             self.toolbar(),
+            self.legend_row(),
             container(self.chart_strip()).height(150).padding([0, 4]),
             self.time_ruler(),
             grid,
@@ -942,11 +944,9 @@ impl App {
         let playing = self.playback == Playback::Playing;
         let fast = self.playback == Playback::Fast;
 
-        let mut toolbar = row![
-            tool("Open", Message::OpenDialog),
-            text("│").size(13),
-            tool("⏮", Message::GoStart),
-            tool("◀", Message::Step(-1)),
+        let transport = theme::group([
+            tool("⏮", Message::GoStart).into(),
+            tool("◀", Message::Step(-1)).into(),
             button(text(if playing { "⏸" } else { "▶" }).size(13))
                 .padding([3, 8])
                 .style(if playing {
@@ -954,9 +954,10 @@ impl App {
                 } else {
                     button::secondary
                 })
-                .on_press(Message::PlayPause),
-            tool("▶│", Message::Step(1)),
-            tool("⏭", Message::GoEnd),
+                .on_press(Message::PlayPause)
+                .into(),
+            tool("▶│", Message::Step(1)).into(),
+            tool("⏭", Message::GoEnd).into(),
             button(text("▶▶").size(13))
                 .padding([3, 8])
                 .style(if fast {
@@ -964,75 +965,106 @@ impl App {
                 } else {
                     button::secondary
                 })
-                .on_press(Message::FastPlay),
-            text("│").size(13),
-            tool("−", Message::ZoomOut),
+                .on_press(Message::FastPlay)
+                .into(),
+        ]);
+
+        let zoom = theme::group([
+            tool("−", Message::ZoomOut).into(),
             button(
                 text(match self.zoom {
                     Zoom::Fit => format!("Fit {:.0}%", self.effective_zoom * 100.0),
                     Zoom::Manual(_) => format!("{:.0}%", self.effective_zoom * 100.0),
                 })
                 .size(12)
+                .font(iced::Font::MONOSPACE),
             )
             .padding([3, 6])
             .style(button::secondary)
-            .on_press(Message::ZoomFit),
-            tool("+", Message::ZoomIn),
-            tool("1:1", Message::ZoomActual),
-            text("│").size(13),
-            tool(order_label(self.order), Message::ToggleOrder),
-            tool(channel_label(self.channel), Message::CycleChannel),
-            tool(matrix_label(self.matrix), Message::CycleMatrix),
-            text("│").size(13),
-            overlay_checkbox("Partitions", self.overlays.partitions, Overlay::Partitions),
-            overlay_checkbox("MVs", self.overlays.motion_vectors, Overlay::MotionVectors),
-            overlay_checkbox("Types", self.overlays.types, Overlay::Types),
-            overlay_checkbox("QP", self.overlays.qp_heatmap, Overlay::QpHeatmap),
-            overlay_checkbox("Sizes", self.overlays.sizes, Overlay::Sizes),
-            overlay_checkbox(
+            .on_press(Message::ZoomFit)
+            .into(),
+            tool("+", Message::ZoomIn).into(),
+            tool("1:1", Message::ZoomActual).into(),
+        ]);
+
+        let order = theme::group([
+            theme::chip(
+                "Display",
+                self.order == ChartOrder::Display,
+                Message::ToggleOrder,
+            ),
+            theme::chip(
+                "Decode",
+                self.order == ChartOrder::Decode,
+                Message::ToggleOrder,
+            ),
+        ]);
+
+        let color = theme::group([
+            tool(channel_label(self.channel), Message::CycleChannel).into(),
+            tool(matrix_label(self.matrix), Message::CycleMatrix).into(),
+        ]);
+
+        let overlay =
+            |label, on, o: Overlay| theme::chip(label, on, Message::ToggleOverlay(o, !on));
+        let overlays = theme::group([
+            text("OVERLAYS").size(10).color(theme::DIM).into(),
+            overlay("Part", self.overlays.partitions, Overlay::Partitions),
+            overlay("MV", self.overlays.motion_vectors, Overlay::MotionVectors),
+            overlay("Types", self.overlays.types, Overlay::Types),
+            overlay("QP", self.overlays.qp_heatmap, Overlay::QpHeatmap),
+            overlay("Sizes", self.overlays.sizes, Overlay::Sizes),
+            overlay(
                 "Slices",
                 self.overlays.slice_boundaries,
-                Overlay::SliceBoundaries
+                Overlay::SliceBoundaries,
             ),
-            // The value glyphs show whatever the active overlay maps: bits
-            // when "Sizes" is on, QP otherwise — label says which.
-            overlay_checkbox(
+            // Value glyphs show bits when "Sizes" is on, QP otherwise.
+            overlay(
                 if self.overlays.sizes {
                     "Values: bits"
                 } else {
                     "Values: QP"
                 },
                 self.overlays.values,
-                Overlay::Values
+                Overlay::Values,
             ),
-            iced::widget::checkbox(self.qp_graph)
-                .label("QP graph")
-                .on_toggle(Message::ToggleQpGraph)
-                .size(14)
-                .text_size(12),
-            iced::widget::checkbox(self.bits_split)
-                .label("Bits split")
-                .on_toggle(Message::ToggleBitsSplit)
-                .size(14)
-                .text_size(12),
-            text("│").size(13),
-            tool("Ref…", Message::OpenRefDialog),
+        ]);
+
+        let mut chart_children: Vec<Element<'_, Message>> = vec![
+            text("CHART").size(10).color(theme::DIM).into(),
+            theme::chip("QP", self.qp_graph, Message::ToggleQpGraph(!self.qp_graph)),
+            theme::chip(
+                "Bits split",
+                self.bits_split,
+                Message::ToggleBitsSplit(!self.bits_split),
+            ),
         ];
         if self.ref_path.is_some() {
-            toolbar = toolbar.push(
-                iced::widget::checkbox(self.show_psnr)
-                    .label("PSNR")
-                    .on_toggle(Message::TogglePsnr)
-                    .size(14)
-                    .text_size(12),
-            );
+            chart_children.push(theme::chip(
+                "PSNR",
+                self.show_psnr,
+                Message::TogglePsnr(!self.show_psnr),
+            ));
         }
-        toolbar
-            .spacing(6)
-            .padding(6)
-            .align_y(iced::Alignment::Center)
-            .wrap()
-            .into()
+        let chart_toggles = theme::group(chart_children);
+
+        row![
+            tool("Open", Message::OpenDialog),
+            transport,
+            zoom,
+            order,
+            color,
+            iced::widget::space::horizontal(),
+            overlays,
+            chart_toggles,
+            tool("Ref…", Message::OpenRefDialog),
+        ]
+        .spacing(6)
+        .padding(6)
+        .align_y(iced::Alignment::Center)
+        .wrap()
+        .into()
     }
 
     fn chart_strip(&self) -> Element<'_, Message> {
@@ -1050,6 +1082,44 @@ impl App {
         .width(Fill)
         .height(Fill)
         .into()
+    }
+
+    /// Legend for the chart: frame-type colors left, position right.
+    fn legend_row(&self) -> Element<'_, Message> {
+        let square = |t: FrameType| {
+            container(row![])
+                .width(9)
+                .height(9)
+                .style(move |_: &Theme| container::Style {
+                    background: Some(iced::Background::Color(theme::frame_type_color(t))),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+        };
+        let mut r = row![].spacing(6).align_y(iced::Alignment::Center);
+        for (t, name) in [
+            (FrameType::I, "I-frame"),
+            (FrameType::P, "P-frame"),
+            (FrameType::B, "B-frame"),
+        ] {
+            r = r.push(square(t));
+            r = r.push(text(name).size(11).color(theme::DIM));
+        }
+        r = r.push(text("· bar height = frame size").size(11).color(theme::DIM));
+        r = r.push(iced::widget::space::horizontal());
+        if let Some(index) = &self.index {
+            let disp = index.frames[self.current as usize].display_index;
+            r = r.push(
+                text(format!("frame {disp} / {}", index.frames.len()))
+                    .size(11)
+                    .font(iced::Font::MONOSPACE)
+                    .color(theme::DIM),
+            );
+        }
+        container(r).padding([0, 8]).into()
     }
 
     /// Time labels aligned with the visible chart window. Labels are anchored
@@ -1140,37 +1210,32 @@ impl App {
         let available = |stage: Stage| stage == Stage::Decoded || obtainable;
         let mut stage_tabs = row![].spacing(2).padding(2);
         for stage in Stage::ALL {
-            let mut b = button(text(stage.label()).size(11)).padding([2, 8]);
-            if stage == self.stage {
-                // active styling (primary default)
-            } else if available(stage) {
-                b = b.style(button::secondary);
-            } else {
-                b = b.style(button::text);
-            }
             if available(stage) {
-                b = b.on_press(Message::SetStage(stage));
+                stage_tabs = stage_tabs.push(theme::chip(
+                    stage.label(),
+                    stage == self.stage,
+                    Message::SetStage(stage),
+                ));
+            } else {
+                // Unavailable (no analysis / >8-bit): dimmed, no action.
+                stage_tabs = stage_tabs.push(
+                    button(text(stage.label()).size(12))
+                        .padding([3, 8])
+                        .style(button::text),
+                );
             }
-            stage_tabs = stage_tabs.push(b);
         }
         stage_tabs = stage_tabs.push(
             iced::widget::pick_list(DiffMode::ALL, Some(self.diff), Message::SetDiff)
                 .text_size(11)
                 .padding([1, 4]),
         );
-        stage_tabs = stage_tabs.push(
-            button(
-                text(if self.memory.is_some() {
-                    "Mem ✓"
-                } else {
-                    "Mem"
-                })
-                .size(11),
-            )
-            .padding([2, 8])
-            .style(button::secondary)
-            .on_press(Message::MemorizeFrame),
-        );
+        stage_tabs = stage_tabs.push(iced::widget::space::horizontal());
+        stage_tabs = stage_tabs.push(theme::chip(
+            "Mem",
+            self.memory.is_some(),
+            Message::MemorizeFrame,
+        ));
 
         let view = shader(FrameView {
             frame: self.frame.as_ref(),
@@ -1188,7 +1253,24 @@ impl App {
         .width(Fill)
         .height(Fill);
 
-        column![stage_tabs, view].into()
+        let caption: Element<'_, Message> = match self.hovered_pixel.or(self.selected_pixel) {
+            Some((x, y)) => {
+                let block = match self.block_coords(x, y) {
+                    Some((unit, bx, by)) => format!(" · {unit} ({bx}, {by})"),
+                    None => String::new(),
+                };
+                container(
+                    text(format!("pixel ({x}, {y}){block}"))
+                        .size(11)
+                        .font(iced::Font::MONOSPACE)
+                        .color(theme::DIM),
+                )
+                .padding([2, 8])
+                .into()
+            }
+            None => container(text("").size(11)).padding([2, 8]).into(),
+        };
+        column![stage_tabs, view, caption].into()
     }
 
     /// Block Info pane: magnified view of the block under the cursor, with
@@ -1289,7 +1371,7 @@ impl App {
                 String::new()
             };
             format!(
-                "{:?} {}×{} {} — {} frames{}{}",
+                "{:?} · {}×{} {} · {} frames{}{}",
                 index.codec,
                 index.info.width,
                 index.info.height,
@@ -1310,13 +1392,7 @@ impl App {
                     h, f.frame_type, f.size_bytes, f.slice_qp, f.poc
                 )
             }
-            _ => self
-                .hovered_pixel
-                .map(|(x, y)| match self.block_coords(x, y) {
-                    Some((unit, bx, by)) => format!("pixel ({x}, {y}) — {unit} ({bx}, {by})"),
-                    None => format!("pixel ({x}, {y})"),
-                })
-                .unwrap_or_default(),
+            _ => String::new(),
         };
 
         let right: String = if let Some(index) = &self.index {
@@ -1346,11 +1422,11 @@ impl App {
 
         container(
             row![
-                text(left).size(11),
+                text(left).size(11).font(iced::Font::MONOSPACE),
                 iced::widget::space::horizontal(),
-                text(middle).size(11),
+                text(middle).size(11).font(iced::Font::MONOSPACE),
                 iced::widget::space::horizontal(),
-                text(right).size(11),
+                text(right).size(11).font(iced::Font::MONOSPACE),
             ]
             .spacing(10),
         )
@@ -1367,9 +1443,9 @@ impl App {
         let f = &index.frames[self.current as usize];
 
         let col = column![
-            text("Stream").size(15),
-            kv("Codec", format!("{:?}", info.codec)),
-            kv(
+            theme::section("Stream"),
+            theme::kv("Codec", format!("{:?}", info.codec)),
+            theme::kv(
                 "Profile",
                 if info.profile.is_empty() {
                     "—".into()
@@ -1377,8 +1453,8 @@ impl App {
                     format!("{} @ L{}", info.profile, info.level)
                 }
             ),
-            kv("Resolution", format!("{}×{}", info.width, info.height)),
-            kv(
+            theme::kv("Resolution", format!("{}×{}", info.width, info.height)),
+            theme::kv(
                 "Bit depth",
                 if info.bit_depth == 0 {
                     "—".into()
@@ -1386,35 +1462,42 @@ impl App {
                     format!("{} ({})", info.bit_depth, info.chroma_format)
                 }
             ),
-            kv(
+            theme::kv(
                 "Frame rate",
                 info.frame_rate
                     .map(|(n, d)| format!("{:.3} fps", n as f64 / d as f64))
                     .unwrap_or_else(|| "—".into()),
             ),
-            kv("Frames", index.frames.len().to_string()),
+            theme::kv("Frames", index.frames.len().to_string()),
             text("").size(6),
-            text("Frame").size(15),
-            kv("Decode #", f.decode_index.to_string()),
-            kv("Display #", f.display_index.to_string()),
-            kv("Type", frame_type_name(f.frame_type).into()),
-            kv("POC", f.poc.to_string()),
-            kv("Slice QP", f.slice_qp.to_string()),
-            kv("Slices", f.slice_count.to_string()),
-            kv("Size", format!("{} B", f.size_bytes)),
-            kv("Offset", format!("{:#x}", f.byte_offset)),
-            kv(
+            row![
+                theme::section("Frame"),
+                theme::badge(
+                    frame_type_name(f.frame_type).into(),
+                    theme::frame_type_color(f.frame_type)
+                )
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            theme::kv("Decode #", f.decode_index.to_string()),
+            theme::kv("Display #", f.display_index.to_string()),
+            theme::kv("POC", f.poc.to_string()),
+            theme::kv("Slice QP", f.slice_qp.to_string()),
+            theme::kv("Slices", f.slice_count.to_string()),
+            theme::kv("Size", format!("{} B", f.size_bytes)),
+            theme::kv("Offset", format!("{:#x}", f.byte_offset)),
+            theme::kv(
                 "PTS",
                 f.pts
                     .map(|t| format!("{:.3} s", t as f64 / 1e9))
                     .unwrap_or_else(|| "—".into()),
             ),
-            kv("L0 refs", format_refs(&f.ref_frames[0])),
-            kv("L1 refs", format_refs(&f.ref_frames[1])),
+            theme::kv("L0 refs", format_refs(&f.ref_frames[0])),
+            theme::kv("L1 refs", format_refs(&f.ref_frames[1])),
         ]
-        .spacing(3);
+        .spacing(4);
 
-        container(iced::widget::scrollable(col.padding(10)))
+        container(iced::widget::scrollable(col.padding(12)))
             .width(Fill)
             .height(Fill)
             .into()
@@ -1519,24 +1602,6 @@ fn overlays_from_env() -> OverlaySettings {
     o
 }
 
-fn overlay_checkbox(label: &str, checked: bool, overlay: Overlay) -> Element<'_, Message> {
-    iced::widget::checkbox(checked)
-        .label(label)
-        .on_toggle(move |v| Message::ToggleOverlay(overlay, v))
-        .size(14)
-        .text_size(12)
-        .into()
-}
-
-fn kv(key: &str, value: String) -> Element<'_, Message> {
-    row![
-        text(format!("{key}:")).size(12).width(90),
-        text(value).size(12)
-    ]
-    .spacing(6)
-    .into()
-}
-
 fn format_refs(refs: &[u32]) -> String {
     if refs.is_empty() {
         "—".into()
@@ -1562,13 +1627,6 @@ fn frame_type_name(t: FrameType) -> &'static str {
         FrameType::I => "I",
         FrameType::P => "P",
         FrameType::B => "B",
-    }
-}
-
-fn order_label(order: ChartOrder) -> &'static str {
-    match order {
-        ChartOrder::Decode => "Decode order",
-        ChartOrder::Display => "Display order",
     }
 }
 
