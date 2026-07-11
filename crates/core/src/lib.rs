@@ -3,7 +3,6 @@
 
 pub mod cache;
 pub mod decode;
-pub mod hrd;
 pub mod index;
 pub mod indexer;
 pub mod media;

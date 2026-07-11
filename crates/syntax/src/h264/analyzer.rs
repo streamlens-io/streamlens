@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use streamlens_types::FrameType;
 
-use crate::analyzer::{AuAnalyzer, AuSummary, HrdTiming, NalSummary, RecordedNal, StreamProps};
+use crate::analyzer::{AuAnalyzer, AuSummary, NalSummary, RecordedNal, StreamProps};
 use crate::bitread::{BitReader, Recorder};
 use crate::diag::{Diagnostics, Severity};
 use crate::h264::sei::SeiPayload;
@@ -47,7 +47,6 @@ impl AuAnalyzer for H264Analyzer {
         let mut first_slice: Option<(h264::NalHeader, h264::SliceHeader)> = None;
         let mut slice_count = 0u16;
         let mut recovery_point = false;
-        let mut hrd = HrdTiming::default();
 
         for nal in iter_nals(au) {
             if nal.bytes.is_empty() {
@@ -95,20 +94,8 @@ impl AuAnalyzer for H264Analyzer {
                     NalType::Sei => {
                         let sps = self.active_sps.and_then(|id| self.sps.get(&id));
                         for msg in h264::sei::parse_sei(&mut r, sps)? {
-                            match msg.payload {
-                                SeiPayload::BufferingPeriod { nal_cpb, .. } => {
-                                    hrd.initial_cpb_removal_delay = nal_cpb.first().map(|c| c.0);
-                                }
-                                SeiPayload::PicTiming {
-                                    cpb_removal_delay,
-                                    dpb_output_delay,
-                                    ..
-                                } => {
-                                    hrd.cpb_removal_delay = Some(cpb_removal_delay);
-                                    hrd.dpb_output_delay = Some(dpb_output_delay);
-                                }
-                                SeiPayload::RecoveryPoint { .. } => recovery_point = true,
-                                SeiPayload::Other { .. } => {}
+                            if matches!(msg.payload, SeiPayload::RecoveryPoint { .. }) {
+                                recovery_point = true;
                             }
                         }
                     }
@@ -160,9 +147,7 @@ impl AuAnalyzer for H264Analyzer {
             slice_qp: sh.slice_qp,
             slice_count,
             ref_frames,
-            dpb: self.dpb.snapshot(),
             nals,
-            hrd,
         })
     }
 
@@ -183,10 +168,6 @@ impl AuAnalyzer for H264Analyzer {
             }
             .to_string(),
             frame_rate: sps.frame_rate(),
-            hrd: sps.vui.as_ref().and_then(|v| {
-                let hrd = v.nal_hrd.as_ref().or(v.vcl_hrd.as_ref())?;
-                Some((hrd.bit_rate(0), hrd.cpb_size(0)))
-            }),
         })
     }
 

@@ -1,5 +1,5 @@
 //! Pure-Rust bitstream syntax layer: NAL parsing, recording bit-reader,
-//! parameter set / slice header parsers, POC + DPB + HRD models.
+//! parameter set / slice header parsers, POC + DPB models.
 //!
 //! No GStreamer or decoder dependencies; operates on raw byte slices.
 

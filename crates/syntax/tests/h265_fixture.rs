@@ -128,31 +128,6 @@ fn analyzes_full_stream() {
     pocs.sort_unstable();
     pocs.dedup();
     assert_eq!(pocs.len(), 25, "duplicate POCs in first GOP");
-
-    // DPB is never empty after the first frame and is bounded.
-    for f in &frames[1..] {
-        assert!(!f.dpb.entries.is_empty(), "DPB empty at poc={}", f.poc);
-    }
-    let sps_max = {
-        let data = fixture();
-        let aus = split_aus(&data);
-        let mut analyzer = H265Analyzer::new();
-        let mut diags = Diagnostics::default();
-        analyzer.analyze(0, aus[0], &mut diags);
-        analyzer
-            .sps(0)
-            .map(|s| s.max_dec_pic_buffering_value())
-            .unwrap_or(16)
-    };
-    for f in &frames {
-        assert!(
-            f.dpb.entries.len() <= sps_max as usize + 1,
-            "DPB exceeds max at poc={}: {} > {}",
-            f.poc,
-            f.dpb.entries.len(),
-            sps_max + 1
-        );
-    }
 }
 
 #[test]

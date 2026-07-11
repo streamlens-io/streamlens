@@ -1,6 +1,6 @@
 //! Codec-agnostic access-unit analysis driven by the indexer.
 
-use streamlens_types::{DpbSnapshot, FrameType};
+use streamlens_types::FrameType;
 
 use crate::diag::Diagnostics;
 
@@ -14,17 +14,6 @@ pub struct NalSummary {
     pub raw_type: u8,
     pub name: &'static str,
     pub is_vcl: bool,
-}
-
-/// Timing values from buffering period / pic timing SEI, feeding the HRD
-/// model. All values are in units of the HRD clock tick.
-#[derive(Debug, Clone, Default)]
-pub struct HrdTiming {
-    /// From buffering period SEI: initial_cpb_removal_delay of CPB 0.
-    pub initial_cpb_removal_delay: Option<u32>,
-    /// From pic timing SEI.
-    pub cpb_removal_delay: Option<u32>,
-    pub dpb_output_delay: Option<u32>,
 }
 
 /// Everything the syntax layer learns about one access unit.
@@ -45,10 +34,7 @@ pub struct AuSummary {
     /// Decode-order indices of the reference pictures in L0/L1 of the first
     /// slice.
     pub ref_frames: [Vec<u32>; 2],
-    /// DPB contents after this picture's marking.
-    pub dpb: DpbSnapshot,
     pub nals: Vec<NalSummary>,
-    pub hrd: HrdTiming,
 }
 
 /// Stateful per-stream analyzer: feed access units in decode order.
@@ -104,6 +90,4 @@ pub struct StreamProps {
     pub bit_depth: u8,
     pub chroma_format: String,
     pub frame_rate: Option<(u32, u32)>,
-    /// Declared HRD parameters of scheduler 0: (bitrate bits/s, CPB bits).
-    pub hrd: Option<(u64, u64)>,
 }

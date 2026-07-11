@@ -126,8 +126,6 @@ pub struct App {
     glyphs: Arc<Vec<Glyph>>,
 
     tab: Tab,
-    /// HRD buffer model, computed once per opened stream.
-    hrd: Option<HrdView>,
     /// Headers of the current frame (None while loading).
     headers: Option<(u32, Arc<Vec<streamlens_syntax::analyzer::RecordedNal>>)>,
     header_expanded: HashSet<Vec<usize>>,
@@ -150,14 +148,6 @@ pub struct App {
     ref_path: Option<PathBuf>,
     /// Show PSNR graph overlay in BarChart.
     show_psnr: bool,
-}
-
-/// Prepared HRD buffer model for the Buffer panel.
-struct HrdView {
-    fullness: Arc<Vec<f64>>,
-    cpb_size: f64,
-    /// Which model parameters were assumed rather than declared.
-    note: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,7 +283,6 @@ impl App {
             segments: Arc::new(Vec::new()),
             glyphs: Arc::new(Vec::new()),
             tab: tab_from_env(),
-            hrd: None,
             headers: None,
             header_expanded: HashSet::new(),
             header_filter: String::new(),
@@ -652,24 +641,6 @@ impl App {
             }
             worker::Event::Opened(index) => {
                 self.indexing = None;
-                self.hrd = streamlens_core::hrd::build_model(&index).map(|m| {
-                    let mut note = if m.declared {
-                        "declared".to_string()
-                    } else {
-                        "estimated: measured bitrate, 1 s CPB".to_string()
-                    };
-                    if !m.initial_fullness_declared {
-                        note.push_str(", initial fullness assumed 90%");
-                    }
-                    if !m.timing_declared {
-                        note.push_str(", timing from frame rate");
-                    }
-                    HrdView {
-                        fullness: Arc::new(streamlens_core::hrd::fullness_before_removal(&m)),
-                        cpb_size: m.cpb_size as f64,
-                        note,
-                    }
-                });
                 // Reset sweep state for the new file.
                 let n = index.frames.len();
                 self.sweep = vec![None; n];
@@ -798,7 +769,6 @@ impl App {
         self.stage_image = None;
         self.segments = Arc::new(Vec::new());
         self.glyphs = Arc::new(Vec::new());
-        self.hrd = None;
         self.sweep.clear();
         self.sweep_done = 0;
         self.sweep_total = 0;
@@ -1202,21 +1172,6 @@ impl App {
                 index,
                 self.frame.as_ref().and_then(|f| f.analysis.as_deref()),
             ),
-            (Some(_), Tab::Buffer) => match &self.hrd {
-                Some(hrd) => iced::widget::canvas(panels::BufferChart {
-                    fullness: hrd.fullness.clone(),
-                    cpb_size: hrd.cpb_size,
-                    params_note: hrd.note.clone(),
-                    current: self.current as usize,
-                })
-                .width(Fill)
-                .height(Fill)
-                .into(),
-                None => container(text("no timing information for HRD model").size(12))
-                    .padding(10)
-                    .into(),
-            },
-            (Some(index), Tab::Dpb) => panels::dpb_view(index, self.current),
         };
         column![bar, body].into()
     }
@@ -1590,14 +1545,12 @@ fn stage_from_env() -> Stage {
     }
 }
 
-/// Debug/testing hook: STREAMLENS_TAB=stream|headers|stats|buffer|dpb
+/// Debug/testing hook: STREAMLENS_TAB=stream|headers|stats
 fn tab_from_env() -> Tab {
     match std::env::var("STREAMLENS_TAB").as_deref() {
         Ok("stream") => Tab::Stream,
         Ok("headers") => Tab::Headers,
         Ok("stats") => Tab::Stats,
-        Ok("buffer") => Tab::Buffer,
-        Ok("dpb") => Tab::Dpb,
         _ => Tab::Info,
     }
 }

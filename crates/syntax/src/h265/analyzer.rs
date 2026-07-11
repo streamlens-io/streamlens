@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use streamlens_types::FrameType;
 
-use crate::analyzer::{AuAnalyzer, AuSummary, HrdTiming, NalSummary, RecordedNal, StreamProps};
+use crate::analyzer::{AuAnalyzer, AuSummary, NalSummary, RecordedNal, StreamProps};
 use crate::bitread::{BitReader, Recorder};
 use crate::diag::{Diagnostics, Severity};
 use crate::h265::sei::SeiPayload;
@@ -53,7 +53,6 @@ impl AuAnalyzer for H265Analyzer {
         let mut first_slice: Option<(h265::NalHeader, h265::SliceHeader)> = None;
         let mut slice_count = 0u16;
         let mut recovery_point = false;
-        let mut hrd = HrdTiming::default();
 
         for nal in iter_nals(au) {
             if nal.bytes.len() < 2 {
@@ -107,25 +106,8 @@ impl AuAnalyzer for H265Analyzer {
                     NalType::PrefixSei | NalType::SuffixSei => {
                         let sps = self.active_sps_id.and_then(|id| self.sps.get(&id));
                         for msg in h265::sei::parse_sei(&mut r, sps)? {
-                            match &msg.payload {
-                                SeiPayload::BufferingPeriod {
-                                    initial_cpb_removal_delay,
-                                    ..
-                                } => {
-                                    hrd.initial_cpb_removal_delay = *initial_cpb_removal_delay;
-                                }
-                                SeiPayload::PicTiming {
-                                    au_cpb_removal_delay_minus1,
-                                    pic_dpb_output_delay,
-                                    ..
-                                } => {
-                                    hrd.cpb_removal_delay = Some(*au_cpb_removal_delay_minus1);
-                                    hrd.dpb_output_delay = Some(*pic_dpb_output_delay);
-                                }
-                                SeiPayload::RecoveryPoint { .. } => {
-                                    recovery_point = true;
-                                }
-                                _ => {}
+                            if matches!(msg.payload, SeiPayload::RecoveryPoint { .. }) {
+                                recovery_point = true;
                             }
                         }
                     }
@@ -210,9 +192,7 @@ impl AuAnalyzer for H265Analyzer {
             slice_qp: sh.slice_qp,
             slice_count,
             ref_frames,
-            dpb: self.dpb.snapshot(),
             nals,
-            hrd,
         })
     }
 
@@ -233,9 +213,6 @@ impl AuAnalyzer for H265Analyzer {
             }
             .to_string(),
             frame_rate: sps.frame_rate(),
-            // H.265 HRD bitrate/CPB values are not retained by the parser
-            // yet; the buffer model falls back to measured bitrate.
-            hrd: None,
         })
     }
 

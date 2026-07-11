@@ -94,13 +94,6 @@ fn analyzes_full_stream() {
     pocs.sort_unstable();
     pocs.dedup();
     assert_eq!(pocs.len(), 25, "duplicate POCs in first GOP");
-
-    // DPB stays within max_num_ref_frames bounds and is never empty after
-    // the first frame.
-    for f in &frames[1..] {
-        assert!(!f.dpb.entries.is_empty());
-        assert!(f.dpb.entries.len() <= 16);
-    }
 }
 
 #[test]

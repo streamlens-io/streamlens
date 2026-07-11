@@ -1,5 +1,5 @@
 //! Side-panel views: Stream Viewer (NAL tree), Headers (syntax field tree),
-//! Statistics, Buffer (HRD), DPB and Block Info.
+//! Statistics and Block Info.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -22,19 +22,10 @@ pub enum Tab {
     Stream,
     Headers,
     Stats,
-    Buffer,
-    Dpb,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
-        Tab::Info,
-        Tab::Stream,
-        Tab::Headers,
-        Tab::Stats,
-        Tab::Buffer,
-        Tab::Dpb,
-    ];
+    pub const ALL: [Tab; 4] = [Tab::Info, Tab::Stream, Tab::Headers, Tab::Stats];
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -42,8 +33,6 @@ impl Tab {
             Tab::Stream => "Stream",
             Tab::Headers => "Headers",
             Tab::Stats => "Stats",
-            Tab::Buffer => "Buffer",
-            Tab::Dpb => "DPB",
         }
     }
 }
@@ -568,140 +557,4 @@ fn pred_mode_color(mode: PredMode) -> iced::Color {
         PredMode::Direct => iced::Color::from_rgb(0.25, 0.85, 0.85),
         PredMode::Pcm => iced::Color::from_rgb(0.95, 0.85, 0.20),
     }
-}
-
-/// Buffer Analyzer: CPB fullness over the timeline, current frame marked.
-pub struct BufferChart {
-    pub fullness: Arc<Vec<f64>>,
-    pub cpb_size: f64,
-    /// Where the model parameters came from (declared vs assumed), shown
-    /// verbatim so estimated inputs are never presented as stream data.
-    pub params_note: String,
-    pub current: usize,
-}
-
-impl iced::widget::canvas::Program<Message> for BufferChart {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &iced::Renderer,
-        _theme: &iced::Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<iced::widget::canvas::Geometry> {
-        use iced::widget::canvas::{Frame, Path, Stroke, Text};
-        use iced::{Color, Point};
-
-        let mut frame = Frame::new(renderer, bounds.size());
-        let n = self.fullness.len();
-        if n == 0 {
-            return vec![frame.into_geometry()];
-        }
-        let (w, h) = (bounds.width, bounds.height - 18.0);
-        let max = self.cpb_size.max(1.0);
-        let x_of = |i: usize| i as f32 / (n.max(2) - 1) as f32 * w;
-        let y_of = |v: f64| h - (v / max).clamp(-0.2, 1.0) as f32 * (h - 4.0);
-
-        // CPB ceiling.
-        frame.stroke(
-            &Path::line(Point::new(0.0, y_of(max)), Point::new(w, y_of(max))),
-            Stroke::default()
-                .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.4))
-                .with_width(1.0),
-        );
-        // Fullness as a min/max envelope per pixel column — a polyline with
-        // one point per frame doesn't scale to six-figure streams.
-        let cols = w.ceil().max(1.0) as usize;
-        let path = Path::new(|b| {
-            let mut started = false;
-            for c in 0..cols {
-                let lo_i = c * n / cols;
-                let hi_i = ((c + 1) * n / cols).max(lo_i + 1).min(n);
-                let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-                for &v in &self.fullness[lo_i..hi_i] {
-                    lo = lo.min(v);
-                    hi = hi.max(v);
-                }
-                let x = c as f32;
-                if !started {
-                    b.move_to(Point::new(x, y_of(hi)));
-                    started = true;
-                } else {
-                    b.line_to(Point::new(x, y_of(hi)));
-                }
-                if lo < hi {
-                    b.line_to(Point::new(x, y_of(lo)));
-                }
-            }
-        });
-        frame.stroke(
-            &path,
-            Stroke::default()
-                .with_color(Color::from_rgb(0.35, 0.75, 1.0))
-                .with_width(1.5),
-        );
-        // Underflow markers (one per column at most).
-        let mut last_col = usize::MAX;
-        for (i, &v) in self.fullness.iter().enumerate() {
-            if v < 0.0 {
-                let col = i * cols / n;
-                if col != last_col {
-                    frame.fill(
-                        &Path::circle(Point::new(x_of(i), y_of(0.0)), 3.0),
-                        Color::from_rgb(1.0, 0.25, 0.25),
-                    );
-                    last_col = col;
-                }
-            }
-        }
-        // Current frame cursor.
-        let cx = x_of(self.current.min(n - 1));
-        frame.stroke(
-            &Path::line(Point::new(cx, 0.0), Point::new(cx, h)),
-            Stroke::default()
-                .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.7))
-                .with_width(1.0),
-        );
-        frame.fill_text(Text {
-            content: format!(
-                "CPB {:.0} kbit ({}) — fullness at cursor {:.0} kbit",
-                max / 1000.0,
-                self.params_note,
-                self.fullness[self.current.min(n - 1)] / 1000.0
-            ),
-            position: Point::new(4.0, h + 2.0),
-            size: iced::Pixels(11.0),
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.8),
-            ..Text::default()
-        });
-        vec![frame.into_geometry()]
-    }
-}
-
-/// DPB panel: reference pictures held after decoding the current frame.
-pub fn dpb_view(index: &StreamIndex, current: u32) -> Element<'_, Message> {
-    let au = &index.analysis[current as usize];
-    let mut col = column![text(format!(
-        "DPB after frame {current} — {} pictures",
-        au.dpb.entries.len()
-    ))
-    .size(13)]
-    .spacing(2);
-    for e in &au.dpb.entries {
-        let f = &index.frames[e.decode_index as usize];
-        col = col.push(nav_row_colored(
-            format!(
-                "POC {} — decode #{} — {:?} — {:?}",
-                e.poc, e.decode_index, f.frame_type, e.marking
-            ),
-            e.decode_index,
-            theme::frame_type_color(f.frame_type),
-        ));
-    }
-    if au.dpb.entries.is_empty() {
-        col = col.push(text("empty").size(12));
-    }
-    scrollable(col.padding(10)).width(Fill).height(Fill).into()
 }

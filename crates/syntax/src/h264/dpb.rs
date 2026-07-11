@@ -3,9 +3,7 @@
 //! reference-eligible and builds the default reference lists per slice.
 //!
 //! Frame pictures only (field pairs are modeled as frames); this feeds the
-//! BarChart reference arrows, the DPB panel and `FrameRecord::ref_frames`.
-
-use streamlens_types::{DpbEntry, DpbMarking, DpbSnapshot};
+//! BarChart reference arrows and `FrameRecord::ref_frames`.
 
 use crate::h264::slice::{Mmco, RefListMod, SliceType};
 use crate::h264::{SliceHeader, Sps};
@@ -255,28 +253,5 @@ impl Dpb {
             }
         }
         mmco5
-    }
-
-    /// Snapshot for the DPB panel.
-    pub fn snapshot(&self) -> DpbSnapshot {
-        DpbSnapshot {
-            entries: self
-                .pics
-                .iter()
-                .map(|p| DpbEntry {
-                    decode_index: p.decode_index,
-                    poc: p.poc,
-                    marking: if p.long_term {
-                        DpbMarking::LongTerm
-                    } else {
-                        DpbMarking::ShortTerm
-                    },
-                })
-                .collect(),
-        }
-    }
-
-    pub fn occupancy(&self) -> usize {
-        self.pics.len()
     }
 }

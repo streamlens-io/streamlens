@@ -5,8 +5,8 @@ An H.264 / H.265 bitstream analyzer.
 Open a video file and inspect how it is actually coded: a per-frame bar
 chart of sizes and types, per-block overlays on the video (QP, prediction
 types, motion vectors, partitions, bit allocation), reconstruction stages
-(predicted / unfiltered / residual), bit-exact header trees, hex view,
-DPB and HRD buffer analysis — with smooth paced playback throughout.
+(predicted / unfiltered / residual) and bit-exact header trees — with
+smooth paced playback throughout.
 
 Built in Rust. GStreamer handles demuxing and parsing; two custom decoder
 elements (patched FFmpeg and libde265, statically linked) attach per-block
@@ -76,8 +76,8 @@ and a guided reading order.
 Toolbar toggles select overlays (partitions, motion vectors, types, QP
 heat, bit-allocation heat, slice boundaries, on-video values) and chart
 lines (QP, intra/inter/skip bit split, PSNR against a reference YUV).
-Side panels: Info, Stream (NALs), Headers (syntax tree), Stats, Buffer
-(HRD), DPB. Panes are draggable and resizable.
+Side panels: Info, Stream (NALs), Headers (syntax tree), Stats. Panes
+are draggable and resizable.
 
 ## Known limitations
 

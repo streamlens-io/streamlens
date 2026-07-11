@@ -4,8 +4,6 @@
 //! sample storage. Reference lists are built from the ShortTermRefPicSet and
 //! LT entries of each slice header.
 
-use streamlens_types::{DpbEntry, DpbMarking, DpbSnapshot};
-
 use crate::h265::slice::{LtEntry, SliceType};
 use crate::h265::sps::ShortTermRefPicSet;
 use crate::h265::NalType;
@@ -260,28 +258,6 @@ impl Dpb {
                 break;
             }
         }
-    }
-
-    pub fn snapshot(&self) -> DpbSnapshot {
-        DpbSnapshot {
-            entries: self
-                .pics
-                .iter()
-                .map(|p| DpbEntry {
-                    decode_index: p.decode_index,
-                    poc: p.poc,
-                    marking: if p.long_term {
-                        DpbMarking::LongTerm
-                    } else {
-                        DpbMarking::ShortTerm
-                    },
-                })
-                .collect(),
-        }
-    }
-
-    pub fn occupancy(&self) -> usize {
-        self.pics.len()
     }
 }
 

@@ -283,6 +283,5 @@ fn stream_info(
             .map(|e| e.to_string_lossy().into_owned())
             .unwrap_or_default(),
         duration_ns,
-        hrd: props.hrd,
     }
 }

@@ -10,8 +10,8 @@ Opening a file runs an **index pass**: GStreamer demuxes any container,
 and every AU is (a) appended to a flat **elementary-stream cache file** and
 (b) fed through a pure-Rust **syntax analyzer** that parses headers, computes
 POC, emulates the DPB and produces one compact `FrameRecord` per frame. From
-then on the container is irrelevant: byte offsets, the hex view, and
-on-demand decoding all address the ES cache. Display decoding runs through
+then on the container is irrelevant: byte offsets and on-demand decoding
+all address the ES cache. Display decoding runs through
 one of two **custom GStreamer elements** (`slh264dec` wrapping a patched
 FFmpeg, `slh265dec` wrapping a patched libde265) that attach a
 `FrameAnalysis` — per-block QP, types, motion vectors, partitions, bit
@@ -25,11 +25,10 @@ through channels.
 ```
 crates/
   types/    streamlens-types    — pure data model, no deps on gst/iced
-  syntax/   streamlens-syntax   — bitstream parsing, POC/DPB/HRD models
+  syntax/   streamlens-syntax   — bitstream parsing, POC/DPB models
   gst/      streamlens-gst      — the two decoder elements + AnalysisMeta
   core/     streamlens-core     — indexing, decode service, playback, cache,
-                                  metrics, HRD model; the only crate the UI
-                                  talks to
+                                  metrics; the only crate the UI talks to
   app/      streamlens (bin)    — iced application
 vendor/     patched-decoder prefixes (gitignored) + smoke tests
 fixtures/   small committed test streams + generate.sh
@@ -66,9 +65,9 @@ stream), `Recorder` builds a `FieldTree` with per-field bit offsets/widths —
 that tree *is* the Headers panel.
 
 Per codec (`h264/`, `h265/`): parameter-set/SEI/slice-header parsers with
-spec-exact field names, plus the stateful models — POC computation, DPB
-emulation (reference lists per frame → BarChart arrows, DPB panel), and
-HRD timing extraction. Everything is driven through one trait:
+spec-exact field names, plus the stateful models — POC computation and DPB
+emulation (reference lists per frame → BarChart arrows). Everything is
+driven through one trait:
 
 ```rust
 trait AuAnalyzer {
@@ -134,8 +133,7 @@ records and stage planes); `slh264dec` decodes with auto frame threading
   `tests/playback_smoothness.rs` and `examples/play_bench.rs`.
 - `session.rs` — ties index + decode + cache; the worker-facing API
   (`frame()`, `headers()`, `es_bytes()`, `set_stages()`).
-- `hrd.rs`, `metrics.rs` — CPB fullness model (Buffer panel) and
-  PSNR/SSIM/MSE/MSAD/DELTA kernels (8/10-bit).
+- `metrics.rs` — PSNR/SSIM/MSE/MSAD/DELTA kernels (8/10-bit).
 
 ## App (`crates/app`)
 
@@ -161,10 +159,9 @@ Rendering: three custom wgpu pipelines inside iced `shader` widgets —
   keyframe ticks, QP steps and the selection cursor; 100k frames is one
   draw call.
 
-`panels.rs` holds the side-panel views (Info/Stream/Headers/Stats/
-Buffer/DPB) and the Block Info view shown in its own pane
-with a cursor-following magnifier; `stages.rs` the stage/diff image
-conversions.
+`panels.rs` holds the side-panel views (Info/Stream/Headers/Stats) and the
+Block Info view shown in its own pane with a cursor-following magnifier;
+`stages.rs` the stage/diff image conversions.
 
 ## Reading order
 
