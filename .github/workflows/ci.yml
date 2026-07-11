@@ -88,6 +88,7 @@ jobs:
             mingw-w64-x86_64-gst-plugins-good
             mingw-w64-x86_64-gst-plugins-bad
             mingw-w64-x86_64-gst-libav
+            mingw-w64-x86_64-ffmpeg
 
       - name: Cache vendored decoders
         uses: actions/cache@v4
