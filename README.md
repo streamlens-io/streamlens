@@ -1,4 +1,4 @@
-# streamlens
+# StreamLens
 
 An H.264 / H.265 bitstream analyzer.
 

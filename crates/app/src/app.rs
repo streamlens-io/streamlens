@@ -302,10 +302,10 @@ impl App {
     pub fn title(&self) -> String {
         match &self.file {
             Some(p) => format!(
-                "streamlens — {}",
+                "StreamLens — {}",
                 p.file_name().unwrap_or_default().to_string_lossy()
             ),
-            None => "streamlens".into(),
+            None => "StreamLens".into(),
         }
     }
 
