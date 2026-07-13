@@ -23,12 +23,6 @@ On Windows, install the GStreamer **MinGW 64-bit** runtime from
 [gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/)
 and add its `bin\` directory to `PATH`.
 
-Run it:
-
-```sh
-streamlens video.mp4        # also .ts .mkv .264 .265 …
-```
-
 ## Build from source
 
 Build dependencies: Rust (stable), git, cmake, a C/C++ toolchain,
@@ -53,7 +47,7 @@ pacman -S git make diffutils mingw-w64-x86_64-{toolchain,cmake,ninja,nasm,pkg-co
 cargo run --release -p streamlens -- video.mp4
 ```
 
-On macOS, `just bundle` assembles `target/StreamLens.app` (proper Dock
+On macOS, `just bundle` assembles `target/StreamLens.app` (if you want proper Dock
 name and icon).
 
 The script downloads FFmpeg and libde265 at pinned commits, applies the
