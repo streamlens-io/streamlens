@@ -4,8 +4,7 @@
 StreamLens is an H.264/H.265 bitstream analyzer that lets you inspect how video is encoded. It offers per-frame size and type analysis, overlays for blocks such as QP, prediction modes, motion vectors, partitions, and bit allocation, reconstruction views for predicted, unfiltered, and residual data, and exact header trees — all with smooth playback.
 
 Built in Rust. GStreamer handles demuxing and parsing; two custom decoder
-elements (patched FFmpeg and libde265, statically linked) attach per-block
-analysis to every decoded frame; the UI is [iced](https://iced.rs) on wgpu.
+elements (using patched FFmpeg and libde265, statically linked) to get debug information for analysis. the UI is [iced](https://iced.rs) with wgpu.
 
 ## Install
 
@@ -62,10 +61,10 @@ patches from `vendor/patches/` (which add per-block analysis export), and
 installs static libraries into `vendor/`. Nothing is installed
 system-wide.
 
-Development workflow: `just check` runs fmt, clippy and the test suite;
-`just bench` measures playback smoothness on generated 4K60/1080p120
-streams. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design
-and a guided reading order.
+## Note on current state
+This is a work-in-progress. I had a personal need for this, and the existing products were simply way too expensive.
+The current state is not perfect, but the goal is to continue to improve on it. 
+Reporting issues, feature requests, and contributions are all welcome : )
 
 ## License
 
