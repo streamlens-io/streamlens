@@ -10,8 +10,6 @@ use crate::decode::DecodedFrame;
 use crate::session::Session;
 use crate::Error;
 
-/// How many frames past the playhead the engine keeps warm.
-const AHEAD: u32 = 64;
 /// Time budget for the initial pre-buffer before emission starts.
 const PREBUFFER_BUDGET: Duration = Duration::from_millis(800);
 
@@ -134,15 +132,11 @@ impl Playback {
     /// without skipping, one cached frame would stall warm-ahead forever)
     /// and undecodable leading pictures (nothing can ever produce them).
     fn next_warm_target(&mut self, session: &Session) -> Option<u32> {
-        // Warm-ahead must stay well under the cache capacity: warming past
-        // it evicts the frames just ahead of the playhead (they are the
-        // LRU-oldest) and every GOP gets decoded again and again.
+        // Warm only as far as the decoder's emissions still land inside
+        // the cache window (they run up to REORDER_AHEAD past the target);
+        // warming past it drops frames as soon as they are decoded.
         let headroom = crate::decode::REORDER_AHEAD + 16;
-        let ahead = AHEAD.min(
-            (session.cache_capacity_frames() as u32)
-                .saturating_sub(headroom)
-                .max(4),
-        );
+        let ahead = session.window().ahead.saturating_sub(headroom).max(4);
         let limit = (self.next_display + ahead).min(session.index.frames.len() as u32);
         while self.warmed < limit {
             let decode_index = session.index.decode_for_display(self.warmed)?;

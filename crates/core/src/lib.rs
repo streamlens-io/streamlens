@@ -10,11 +10,12 @@ pub mod playback;
 pub mod session;
 pub mod sweep;
 
+pub use cache::CacheWindow;
 pub use decode::{DecodeService, DecodedFrame};
 pub use index::{IndexProgress, StreamIndex};
 pub use indexer::Indexer;
 pub use playback::Playback;
-pub use session::Session;
+pub use session::{estimated_frame_bytes, Session};
 /// Syntax trees for the Headers panel; re-exported so the UI depends on
 /// core only.
 pub use streamlens_syntax::{analyzer::RecordedNal, FieldNode};

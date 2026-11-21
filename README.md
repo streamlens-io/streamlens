@@ -66,6 +66,7 @@ testing and screenshots):
 | `STREAMLENS_TAB=stream\|headers\|stats` | Side panel tab |
 | `STREAMLENS_OVERLAYS=partitions,mv,types,qp,sizes,slices,values` | Overlays on |
 | `STREAMLENS_BITS_SPLIT=1` | Chart bars split into intra/inter/skip bits |
+| `STREAMLENS_SETTINGS_OPEN=1` | Open with the settings dialog shown |
 
 ## Note on current state
 This is a work-in-progress. I had a personal need for this, and the existing products were simply way too expensive.

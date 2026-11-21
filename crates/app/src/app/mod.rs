@@ -16,6 +16,7 @@ use streamlens_core::{DecodedFrame, StreamIndex, SweepFrame};
 use streamlens_types::FrameType;
 
 use crate::panels::Tab;
+use crate::settings::Settings;
 use crate::widgets::barchart::{self, ChartOrder};
 use crate::widgets::frame_view::{self, ChannelMode, ColorMatrix, Zoom};
 use crate::widgets::overlays::{Glyph, OverlaySettings, Segment};
@@ -23,6 +24,7 @@ use crate::worker::{self, Command};
 
 mod chrome;
 mod panes;
+mod settings_dialog;
 mod update;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,6 +153,9 @@ pub struct App {
     ref_path: Option<PathBuf>,
     /// Show PSNR graph overlay in BarChart.
     show_psnr: bool,
+
+    settings: Settings,
+    settings_open: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +214,12 @@ pub enum Message {
     TogglePsnr(bool),
     OpenRefDialog,
     ReferenceChosen(Option<PathBuf>),
+    /// Opens the settings dialog, or closes and saves it.
+    ToggleSettings,
+    SetFramesAhead(u32),
+    SetFramesBehind(u32),
+    /// Sends the edited frame window to the worker (slider released).
+    ApplyWindow,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -298,6 +309,9 @@ impl App {
             bits_series: Vec::new(),
             ref_path: None,
             show_psnr: false,
+            settings: Settings::load(),
+            // Debug/testing hook: STREAMLENS_SETTINGS_OPEN=1
+            settings_open: std::env::var("STREAMLENS_SETTINGS_OPEN").as_deref() == Ok("1"),
         };
         (app, Task::none())
     }
@@ -390,7 +404,11 @@ impl App {
                 .style(container::danger),
             );
         }
-        root.into()
+        if self.settings_open {
+            self.with_settings_dialog(root.into())
+        } else {
+            root.into()
+        }
     }
 }
 

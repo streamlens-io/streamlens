@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use iced::futures::channel::mpsc as iced_mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
-use streamlens_core::{DecodedFrame, Playback, Session, StreamIndex, Sweep, SweepFrame};
+use streamlens_core::{
+    CacheWindow, DecodedFrame, Playback, Session, StreamIndex, Sweep, SweepFrame,
+};
 
 /// Commands from the UI to the worker.
 #[derive(Debug, Clone)]
@@ -33,6 +35,8 @@ pub enum Command {
     Headers(u32),
     /// Set (or clear) the reference YUV path; restarts the sweep.
     SetReference(Option<PathBuf>),
+    /// Window of decoded frames kept around the playhead.
+    SetWindow(CacheWindow),
 }
 
 /// Events from the worker to the UI.
@@ -94,6 +98,7 @@ struct Worker {
     /// Inputs needed to (re)start the sweep.
     path: Option<PathBuf>,
     ref_path: Option<PathBuf>,
+    window: CacheWindow,
 }
 
 impl Worker {
@@ -106,6 +111,7 @@ impl Worker {
             sweep: None,
             path: None,
             ref_path: None,
+            window: CacheWindow::default(),
         }
     }
 
@@ -216,6 +222,12 @@ impl Worker {
                 self.ref_path = ref_path;
                 self.restart_sweep();
             }
+            Command::SetWindow(window) => {
+                self.window = window;
+                if let Some(s) = self.session.as_mut() {
+                    s.set_window(window);
+                }
+            }
         }
     }
 
@@ -234,7 +246,8 @@ impl Worker {
             });
         };
         match Session::open(&path, progress) {
-            Ok(s) => {
+            Ok(mut s) => {
+                s.set_window(self.window);
                 self.send(Event::Opened(s.index.clone()));
                 self.session = Some(s);
                 self.restart_sweep();

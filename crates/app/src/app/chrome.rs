@@ -110,12 +110,15 @@ impl App {
             ));
         }
         let chart_toggles = theme::group(chart_children);
-        let reference = theme::group([theme::flat("Ref…", Message::OpenRefDialog)]);
+        let reference = theme::group([
+            theme::flat("Ref…", Message::OpenRefDialog),
+            theme::flat("Settings", Message::ToggleSettings),
+        ]);
 
         // Everything fits one row on a wide window (overlays right-aligned
         // via the spacer). Below the breakpoint the spacer would force
         // clipping, so the groups flow across wrapped rows instead.
-        if self.window_width >= 1180.0 {
+        if self.window_width >= 1340.0 {
             row![
                 theme::accent("Open", Message::OpenDialog),
                 transport,

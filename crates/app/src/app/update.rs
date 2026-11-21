@@ -239,6 +239,27 @@ impl App {
                 },
                 Message::ReferenceChosen,
             ),
+            Message::ToggleSettings => {
+                if self.settings_open {
+                    self.settings.save();
+                }
+                self.settings_open = !self.settings_open;
+                Task::none()
+            }
+            Message::SetFramesAhead(n) => {
+                self.settings.frames_ahead = n;
+                Task::none()
+            }
+            Message::SetFramesBehind(n) => {
+                self.settings.frames_behind = n;
+                Task::none()
+            }
+            Message::ApplyWindow => {
+                if let Some(tx) = &self.worker {
+                    let _ = tx.send(Command::SetWindow(self.settings.window()));
+                }
+                Task::none()
+            }
             Message::ReferenceChosen(path) => {
                 self.ref_path = path.clone();
                 if let Some(tx) = &self.worker {
@@ -311,6 +332,7 @@ impl App {
     fn on_worker(&mut self, event: worker::Event) -> Task<Message> {
         match event {
             worker::Event::Ready(tx) => {
+                let _ = tx.send(Command::SetWindow(self.settings.window()));
                 self.worker = Some(tx);
                 if let Some(path) = self.file.clone() {
                     self.open(path);

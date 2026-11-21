@@ -88,6 +88,9 @@ fn sweep_thread(
         }
     };
 
+    // The sweep only walks forward: keep no frames behind it.
+    session.set_window(crate::cache::CacheWindow::new(0, 0));
+
     let n = session.index.frames.len() as u32;
     let mut batch: Vec<(u32, SweepFrame)> = Vec::with_capacity(16);
 
