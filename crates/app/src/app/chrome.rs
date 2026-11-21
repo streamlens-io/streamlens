@@ -250,10 +250,12 @@ impl App {
     }
 
     pub(super) fn status_bar(&self) -> Element<'_, Message> {
+        // ASCII dots: the monospace font has no "…", and a missing glyph
+        // blanks the whole text.
         let left: String = if let Some((frames, fraction)) = self.indexing {
             match fraction {
-                Some(fr) => format!("indexing… {frames} frames ({:.0}%)", fr * 100.0),
-                None => format!("indexing… {frames} frames"),
+                Some(fr) => format!("indexing... {frames} frames ({:.0}%)", fr * 100.0),
+                None => format!("indexing... {frames} frames"),
             }
         } else if let Some(index) = &self.index {
             let sweep_suffix = if self.sweep_total > 0 && self.sweep_done < self.sweep_total {
