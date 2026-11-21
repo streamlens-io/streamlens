@@ -82,20 +82,17 @@ fn indexes_h264_raw_es() {
     assert_eq!(idx.frames[0].slice_count, 2, "x264 -slices 2");
 }
 
-/// Frame sizes and offsets describe the analyzed file: they must equal the
-/// packet sizes and positions ffprobe reports, whatever the ES cache adds
-/// for decoding (parameter sets in front of keyframes, start codes for
+/// Frame sizes and offsets describe the analyzed file: for containers they
+/// must equal the packet sizes and positions ffprobe reports, whatever is
+/// added for decoding (parameter sets in front of keyframes, start codes for
 /// length-prefixed samples).
 #[test]
 fn frame_sizes_and_offsets_match_ffprobe() {
     for name in [
         "h264_prog.mp4",
-        "h264_prog.264",
-        "h264_interlaced.264",
         "h264.ts",
         "h264_opengop.ts",
         "hevc_8bit.mp4",
-        "hevc_8bit.265",
         "hevc_10bit.mkv",
     ] {
         let out = std::process::Command::new("ffprobe")
@@ -124,5 +121,23 @@ fn frame_sizes_and_offsets_match_ffprobe() {
             .map(|f| (f.size_bytes, f.file_offset))
             .collect();
         assert_eq!(actual, expected, "{name}");
+    }
+}
+
+/// In raw Annex B the frame boundaries come from the parser, and FFmpeg
+/// versions place a 4-byte start code's leading zero on different sides
+/// (ffprobe 6.1 vs 8.1), so ffprobe is no stable reference there. Exact
+/// either way: the frames tile the whole file, in order, without gaps.
+#[test]
+fn raw_es_frames_tile_the_file() {
+    for name in ["h264_prog.264", "h264_interlaced.264", "hevc_8bit.265"] {
+        let file_size = std::fs::metadata(fixture(name)).unwrap().len();
+        let idx = Indexer.index(&fixture(name), |_| {}).unwrap().0;
+        let mut expect = 0u64;
+        for f in idx.frames.iter() {
+            assert_eq!(f.file_offset, expect, "{name}: frame {}", f.decode_index);
+            expect += f.size_bytes as u64;
+        }
+        assert_eq!(expect, file_size, "{name}");
     }
 }
