@@ -109,8 +109,10 @@ fn plane8(img: &PlanarImage, plane: usize) -> std::borrow::Cow<'_, [u8]> {
     let data = &img.planes[plane];
     if img.bit_depth > 8 {
         let shift = img.bit_depth - 8;
-        data.chunks_exact(2)
-            .map(|c| (u16::from_le_bytes([c[0], c[1]]) >> shift) as u8)
+        data.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| (u16::from_le_bytes(c) >> shift) as u8)
             .collect::<Vec<u8>>()
             .into()
     } else {

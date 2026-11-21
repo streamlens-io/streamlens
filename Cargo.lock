@@ -3973,12 +3973,10 @@ dependencies = [
 name = "streamlens-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "env_logger",
  "log",
  "rayon",
  "serde",
- "serde_json",
  "streamlens-media",
  "streamlens-syntax",
  "streamlens-types",
@@ -4000,7 +3998,6 @@ dependencies = [
 name = "streamlens-syntax"
 version = "0.1.0"
 dependencies = [
- "log",
  "streamlens-types",
  "thiserror 2.0.18",
 ]

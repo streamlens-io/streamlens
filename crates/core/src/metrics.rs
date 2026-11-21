@@ -93,8 +93,10 @@ pub fn compute(metric: Metric, a: &PlanarImage, b: &PlanarImage) -> Option<Metri
 fn to_samples(plane: &[u8], wide: bool) -> Vec<u16> {
     if wide {
         plane
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect()
     } else {
         plane.iter().map(|&b| b as u16).collect()
