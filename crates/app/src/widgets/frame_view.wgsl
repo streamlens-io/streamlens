@@ -6,7 +6,9 @@ struct Uniforms {
     // xy: scale, zw: offset (NDC)
     transform: vec4<f32>,
     // x: matrix selector (0 = BT.601, 1 = BT.709, 2 = BT.2020)
-    // y: sample scale (1.0 for 8-bit, 64.06 for 10-bit in R16Unorm)
+    // y: weight of the R channel, w: weight of the G channel. 8-bit planes
+    //    are R8Unorm (1, 0); deeper planes are RG8Unorm holding the low and
+    //    high byte of each little-endian u16 sample (255/max, 65280/max).
     // z: channel mode (0 = color, 1 = Y, 2 = U, 3 = V)
     params: vec4<f32>,
 }
@@ -68,10 +70,10 @@ fn yuv_to_rgb(yuv: vec3<f32>, selector: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let scale = uniforms.params.y;
-    let y = textureSample(y_tex, samp, in.uv).r * scale;
-    let u = textureSample(u_tex, samp, in.uv).r * scale;
-    let v = textureSample(v_tex, samp, in.uv).r * scale;
+    let weights = uniforms.params.yw;
+    let y = dot(textureSample(y_tex, samp, in.uv).rg, weights);
+    let u = dot(textureSample(u_tex, samp, in.uv).rg, weights);
+    let v = dot(textureSample(v_tex, samp, in.uv).rg, weights);
     let mode = uniforms.params.z;
     if mode > 0.5 && mode < 1.5 {
         return vec4<f32>(y, y, y, 1.0);

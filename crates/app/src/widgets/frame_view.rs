@@ -353,10 +353,14 @@ impl shader::Primitive for FramePrimitive {
             0.5 - self.center.0 * self.zoom / bw,
             0.5 - self.center.1 * self.zoom / bh,
         );
-        let sample_scale = if image.bit_depth > 8 {
-            65535.0 / ((1 << image.bit_depth) - 1) as f32
+        // Weights that rebuild a normalized sample from the texture's R and G
+        // channels (see `upload_frame`): 8-bit is R alone; deeper samples
+        // are the little-endian u16 split over R (low) and G (high byte).
+        let (lo_weight, hi_weight) = if image.bit_depth > 8 {
+            let max = ((1 << image.bit_depth) - 1) as f32;
+            (255.0 / max, 65280.0 / max)
         } else {
-            1.0
+            (1.0, 0.0)
         };
         inst.upload_uniforms(
             queue,
@@ -367,14 +371,14 @@ impl shader::Primitive for FramePrimitive {
                     ColorMatrix::Bt709 => 1.0,
                     ColorMatrix::Bt2020 => 2.0,
                 },
-                sample_scale,
+                lo_weight,
                 match self.channel {
                     ChannelMode::Color => 0.0,
                     ChannelMode::Y => 1.0,
                     ChannelMode::U => 2.0,
                     ChannelMode::V => 3.0,
                 },
-                0.0,
+                hi_weight,
             ],
             [scale.0, scale.1, offset.0, offset.1],
             [(1.0 / self.zoom).clamp(0.05, 4.0), self.zoom, 0.0, 0.0],
@@ -691,8 +695,13 @@ mod pipeline {
                 .as_ref()
                 .is_none_or(|t| t.dims != (img.width, img.height, img.bit_depth));
             if needs_alloc {
+                // R16Unorm needs TEXTURE_FORMAT_16BIT_NORM, which iced does
+                // not request; RG8Unorm takes the same little-endian u16
+                // bytes and stays filterable. The shader recombines the
+                // bytes (bilinear filtering is linear, so per-byte filtering
+                // sums to the filtered sample).
                 let format = if img.bit_depth > 8 {
-                    wgpu::TextureFormat::R16Unorm
+                    wgpu::TextureFormat::Rg8Unorm
                 } else {
                     wgpu::TextureFormat::R8Unorm
                 };
