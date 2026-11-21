@@ -48,13 +48,21 @@ build_ffmpeg() {
   fetch "$FFMPEG_REPO" "$FFMPEG_COMMIT" "$dir"
   git -C "$dir" -c user.name=vendor -c user.email=vendor@localhost \
     am "$VENDOR"/patches/ffmpeg/*.patch
+  rm -rf "$prefix" # no stale libraries from an earlier configure
+  # libavformat demuxes every container the app opens; the analysis H.264
+  # decoder lives in libavcodec. The mp4toannexb filters normalize
+  # length-prefixed (avcC/hvcC) samples to Annex B access units.
   (cd "$dir" && ./configure \
     --prefix="$prefix" \
     --disable-everything --disable-programs --disable-doc \
     --disable-network --disable-autodetect \
-    --enable-decoder=h264 --enable-parser=h264 \
-    --enable-demuxer=h264 --enable-demuxer=mov \
+    --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
+    --enable-decoder=h264 \
+    --enable-parser=h264 --enable-parser=hevc \
+    --enable-demuxer=h264 --enable-demuxer=hevc --enable-demuxer=mov \
     --enable-demuxer=matroska --enable-demuxer=mpegts \
+    --enable-demuxer=avi --enable-demuxer=flv \
+    --enable-bsf=h264_mp4toannexb --enable-bsf=hevc_mp4toannexb \
     --enable-protocol=file \
     --enable-static --disable-shared)
   make -C "$dir" -j"$JOBS"
@@ -67,6 +75,7 @@ build_libde265() {
   fetch "$LIBDE265_REPO" "$LIBDE265_COMMIT" "$dir"
   git -C "$dir" -c user.name=vendor -c user.email=vendor@localhost \
     am "$VENDOR"/patches/libde265/*.patch
+  rm -rf "$prefix" "$dir/build"
   cmake -S "$dir" -B "$dir/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" \

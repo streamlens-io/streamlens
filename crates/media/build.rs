@@ -34,6 +34,7 @@ fn main() {
     // Relink when the vendored static libraries are rebuilt.
     for lib in [
         de265.join("lib/libde265.a"),
+        ffmpeg.join("lib/libavformat.a"),
         ffmpeg.join("lib/libavcodec.a"),
         ffmpeg.join("lib/libavutil.a"),
     ] {
@@ -67,20 +68,23 @@ fn main() {
         .write_to_file(out.join("de265_bindings.rs"))
         .expect("write de265 bindings");
 
-    // FFmpeg: minimal libavcodec decode API + our analysis side data.
+    // FFmpeg: demux + bitstream filter + decode API, and our analysis
+    // side data.
     bindgen::Builder::default()
         .header_contents(
             "ffmpeg_wrapper.h",
-            "#include <libavcodec/avcodec.h>\n\
+            "#include <libavformat/avformat.h>\n\
+             #include <libavcodec/avcodec.h>\n\
+             #include <libavcodec/bsf.h>\n\
              #include <libavutil/opt.h>\n\
              #include <libavutil/imgutils.h>\n\
              #include <libavutil/sl_h264_analysis.h>\n",
         )
         .clang_arg(format!("-I{}", ffmpeg.join("include").display()))
         .allowlist_function(
-            "avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*",
+            "avformat_.*|av_read_frame|avio_.*|av_bsf_.*|avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*|av_strerror",
         )
-        .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID")
+        .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID|AVMediaType|AVDiscard")
         .allowlist_var("AV_.*|FF_.*|SL_H264.*")
         .layout_tests(layout_tests)
         .derive_default(true)
@@ -98,6 +102,7 @@ fn main() {
         ffmpeg.join("lib").display()
     );
     println!("cargo:rustc-link-lib=static=de265");
+    println!("cargo:rustc-link-lib=static=avformat");
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
 

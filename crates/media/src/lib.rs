@@ -9,12 +9,24 @@ use std::sync::Arc;
 use gstreamer as gst;
 use streamlens_types::FrameAnalysis;
 
+pub mod demux;
 pub mod ffi;
 pub mod meta;
 pub mod slh264dec;
 pub mod slh265dec;
 
+pub use demux::{AccessUnit, Demuxer};
 pub use meta::AnalysisMeta;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{call} failed: {msg}")]
+    Ffmpeg { call: &'static str, msg: String },
+    #[error("no H.264/H.265 video stream found")]
+    NoVideoStream,
+    #[error("path is not representable for FFmpeg")]
+    InvalidPath,
+}
 
 /// Registers the streamlens elements with GStreamer. Idempotent; safe to
 /// call from concurrent sessions.

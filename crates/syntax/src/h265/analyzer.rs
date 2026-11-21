@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use streamlens_types::FrameType;
 
-use crate::analyzer::{AuAnalyzer, AuSummary, NalSummary, RecordedNal, StreamProps};
+use crate::analyzer::{
+    AuAnalyzer, AuSummary, NalSummary, ParameterSetStore, RecordedNal, StreamProps,
+};
 use crate::bitread::{BitReader, Recorder};
 use crate::diag::{Diagnostics, Severity};
 use crate::h265::sei::SeiPayload;
@@ -21,6 +23,7 @@ pub struct H265Analyzer {
     active_sps_id: Option<u32>,
     poc_state: PocState,
     dpb: Dpb,
+    param_sets: ParameterSetStore,
 }
 
 impl H265Analyzer {
@@ -83,12 +86,14 @@ impl AuAnalyzer for H265Analyzer {
                 match header.nal_type {
                     NalType::Vps => {
                         let v = h265::vps::parse_vps(&mut r)?;
+                        self.param_sets.insert(raw_type, v.vps_id as u32, nal.bytes);
                         self.vps.insert(v.vps_id, v);
                     }
                     NalType::Sps => {
                         let s = h265::sps::parse_sps(&mut r)?;
                         let id = s.sps_seq_parameter_set_id;
                         self.active_sps_id.get_or_insert(id);
+                        self.param_sets.insert(raw_type, id, nal.bytes);
                         self.sps.insert(id, s);
                     }
                     NalType::Pps => {
@@ -101,6 +106,8 @@ impl AuAnalyzer for H265Analyzer {
                             });
                         }
                         self.active_sps_id = Some(p.pps_seq_parameter_set_id);
+                        self.param_sets
+                            .insert(raw_type, p.pps_pic_parameter_set_id, nal.bytes);
                         self.pps.insert(p.pps_pic_parameter_set_id, p);
                     }
                     NalType::PrefixSei | NalType::SuffixSei => {
@@ -193,6 +200,13 @@ impl AuAnalyzer for H265Analyzer {
             slice_count,
             ref_frames,
             nals,
+        })
+    }
+
+    fn insert_parameter_sets(&self, au: &[u8], summary: &mut AuSummary) -> Option<Vec<u8>> {
+        self.param_sets.splice(au, summary, &[32, 33, 34], 35, |t| {
+            let n = NalType::from_raw(t);
+            (n.name(), n.is_vcl())
         })
     }
 

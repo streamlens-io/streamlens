@@ -6,8 +6,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use gstreamer as gst;
-use gstreamer::prelude::*;
+use streamlens_media::Demuxer;
 use streamlens_syntax::diag::Diagnostics;
 use streamlens_syntax::h264::H264Analyzer;
 use streamlens_syntax::h265::H265Analyzer;
@@ -15,7 +14,6 @@ use streamlens_syntax::{AuAnalyzer, AuSummary};
 use streamlens_types::{Codec, FrameRecord, StreamInfo};
 
 use crate::index::{IndexProgress, StreamIndex};
-use crate::media;
 use crate::Error;
 
 /// Indexes a media file. Blocking; run on a worker thread.
@@ -42,21 +40,15 @@ impl Indexer {
         path: &Path,
         mut progress: impl FnMut(IndexProgress),
     ) -> Result<(StreamIndex, Box<dyn AuAnalyzer>), Error> {
-        let (pipeline, appsink) = media::build_au_pipeline(path)?;
-        pipeline.set_state(gst::State::Playing)?;
-        // Ensure teardown also on early error paths.
-        let result = self.pull_all(path, &pipeline, &appsink, &mut progress);
-        let _ = pipeline.set_state(gst::State::Null);
-        result
-    }
+        let mut demuxer = Demuxer::open(path).map_err(|e| match e {
+            streamlens_media::Error::NoVideoStream => {
+                Error::NoVideoStream(path.to_string_lossy().into_owned())
+            }
+            e => e.into(),
+        })?;
+        let codec = demuxer.codec();
+        let mut analyzer = make_analyzer(codec);
 
-    fn pull_all(
-        &self,
-        path: &Path,
-        pipeline: &gst::Pipeline,
-        appsink: &gstreamer_app::AppSink,
-        progress: &mut impl FnMut(IndexProgress),
-    ) -> Result<(StreamIndex, Box<dyn AuAnalyzer>), Error> {
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -68,112 +60,28 @@ impl Indexer {
         let es_cache_path = self
             .cache_dir
             .join(format!("streamlens-{stem}-{}-{seq}.es", std::process::id()));
-        let mut es_writer = BufWriter::new(File::create(&es_cache_path)?);
-
-        let mut codec: Option<Codec> = None;
-        let mut analyzer: Option<Box<dyn AuAnalyzer>> = None;
-        let mut diags = Diagnostics::default();
-        let mut frames: Vec<FrameRecord> = Vec::new();
-        let mut analysis: Vec<AuSummary> = Vec::new();
-        let mut es_offset = 0u64;
-        let mut duration: Option<gst::ClockTime> = None;
-
-        loop {
-            let sample = match appsink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
-                Some(s) => s,
-                None => {
-                    media::check_bus_error(pipeline)?;
-                    if appsink.is_eos() {
-                        break;
-                    }
-                    continue;
-                }
-            };
-
-            if codec.is_none() {
-                let caps = sample
-                    .caps()
-                    .ok_or_else(|| Error::Pipeline("sample without caps".into()))?;
-                let c = media::codec_from_caps(caps)?;
-                analyzer = Some(make_analyzer(c)?);
-                codec = Some(c);
-                duration = pipeline
-                    .query_duration::<gst::ClockTime>()
-                    .filter(|d| !d.is_zero());
+        let result = index_into(
+            &mut demuxer,
+            analyzer.as_mut(),
+            &es_cache_path,
+            &mut progress,
+        );
+        let (mut frames, analysis, diags, es_size) = match result {
+            Ok(r) if !r.0.is_empty() => r,
+            // Everything downstream assumes at least one frame
+            // (frames.len()-1 arithmetic, keyframe lookups).
+            Ok(_) => {
+                std::fs::remove_file(&es_cache_path).ok();
+                return Err(Error::Pipeline(format!(
+                    "no decodable video frames found in {}",
+                    path.display()
+                )));
             }
-
-            let Some(buffer) = sample.buffer() else {
-                continue;
-            };
-            let map = buffer
-                .map_readable()
-                .map_err(|_| Error::Pipeline("unmappable buffer".into()))?;
-            let au = map.as_slice();
-
-            let decode_index = frames.len() as u32;
-            let Some(summary) = analyzer.as_mut().expect("analyzer set with codec").analyze(
-                decode_index,
-                au,
-                &mut diags,
-            ) else {
-                // Parameter sets only (no picture): bytes still belong to the
-                // ES so offsets stay contiguous; attribute them to the next
-                // frame by simply writing them through.
-                es_writer.write_all(au)?;
-                es_offset += au.len() as u64;
-                continue;
-            };
-
-            es_writer.write_all(au)?;
-            frames.push(FrameRecord {
-                decode_index,
-                display_index: decode_index, // finalized below
-                byte_offset: es_offset,
-                size_bytes: au.len() as u32,
-                frame_type: summary.frame_type,
-                is_keyframe: summary.is_keyframe
-                    || !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT),
-                is_idr: summary.is_idr,
-                is_rasl: summary.is_rasl,
-                pts: buffer.pts().map(|t| t.nseconds() as i64),
-                dts: buffer.dts().map(|t| t.nseconds() as i64),
-                duration: buffer.duration().map(|t| t.nseconds() as i64),
-                poc: summary.poc,
-                temporal_id: summary.temporal_id,
-                slice_qp: summary.slice_qp.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
-                slice_count: summary.slice_count,
-                ref_frames: summary.ref_frames.clone(),
-            });
-            analysis.push(summary);
-            es_offset += au.len() as u64;
-
-            if frames.len().is_multiple_of(64) {
-                let fraction = duration.and_then(|d| {
-                    let pts = frames.last()?.pts?;
-                    Some((pts as f64 / d.nseconds() as f64) as f32)
-                });
-                progress(IndexProgress {
-                    frames_indexed: frames.len() as u32,
-                    fraction,
-                });
+            Err(e) => {
+                std::fs::remove_file(&es_cache_path).ok();
+                return Err(e);
             }
-        }
-        es_writer.flush()?;
-
-        // Everything downstream assumes at least one frame (frames.len()-1
-        // arithmetic, keyframe lookups); an empty index must be an error.
-        let (Some(codec), Some(analyzer)) = (codec, analyzer) else {
-            std::fs::remove_file(&es_cache_path).ok();
-            return Err(Error::NoVideoStream(path.to_string_lossy().into_owned()));
         };
-        if frames.is_empty() {
-            std::fs::remove_file(&es_cache_path).ok();
-            return Err(Error::Pipeline(format!(
-                "no decodable video frames found in {}",
-                path.display()
-            )));
-        }
-
         let display_to_decode = assign_display_order(&mut frames);
         let props = analyzer.stream_props().unwrap_or_default();
         let info = stream_info(codec, &frames, props, path);
@@ -193,17 +101,82 @@ impl Indexer {
                 stats,
                 diagnostics: diags,
                 es_cache_path,
-                es_size: es_offset,
+                es_size,
             },
             analyzer,
         ))
     }
 }
 
-fn make_analyzer(codec: Codec) -> Result<Box<dyn AuAnalyzer>, Error> {
+type Indexed = (Vec<FrameRecord>, Vec<AuSummary>, Diagnostics, u64);
+
+/// Demuxes every access unit into the ES cache file and the frame list.
+/// Keyframes get their parameter sets inserted when they lack them, so any
+/// keyframe-aligned byte range of the cache decodes standalone.
+fn index_into(
+    demuxer: &mut Demuxer,
+    analyzer: &mut dyn AuAnalyzer,
+    es_cache_path: &Path,
+    progress: &mut impl FnMut(IndexProgress),
+) -> Result<Indexed, Error> {
+    let mut es_writer = BufWriter::new(File::create(es_cache_path)?);
+    let mut diags = Diagnostics::default();
+    let mut frames: Vec<FrameRecord> = Vec::new();
+    let mut analysis: Vec<AuSummary> = Vec::new();
+    let mut es_offset = 0u64;
+
+    while let Some(au) = demuxer.read()? {
+        let decode_index = frames.len() as u32;
+        let Some(mut summary) = analyzer.analyze(decode_index, au.data, &mut diags) else {
+            // Parameter sets only (no picture): bytes still belong to the
+            // ES so offsets stay contiguous; attribute them to the next
+            // frame by simply writing them through.
+            es_writer.write_all(au.data)?;
+            es_offset += au.data.len() as u64;
+            continue;
+        };
+        summary.is_keyframe |= au.keyframe;
+        let rewritten = analyzer.insert_parameter_sets(au.data, &mut summary);
+        let bytes = rewritten.as_deref().unwrap_or(au.data);
+
+        es_writer.write_all(bytes)?;
+        frames.push(FrameRecord {
+            decode_index,
+            display_index: decode_index, // finalized below
+            byte_offset: es_offset,
+            size_bytes: bytes.len() as u32,
+            frame_type: summary.frame_type,
+            is_keyframe: summary.is_keyframe,
+            is_idr: summary.is_idr,
+            is_rasl: summary.is_rasl,
+            pts: au.pts_ns,
+            dts: au.dts_ns,
+            duration: au.duration_ns,
+            poc: summary.poc,
+            temporal_id: summary.temporal_id,
+            slice_qp: summary.slice_qp.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+            slice_count: summary.slice_count,
+            ref_frames: summary.ref_frames.clone(),
+        });
+        es_offset += bytes.len() as u64;
+        let fraction = au.progress;
+        analysis.push(summary);
+
+        if frames.len().is_multiple_of(64) {
+            progress(IndexProgress {
+                frames_indexed: frames.len() as u32,
+                fraction,
+            });
+        }
+    }
+    es_writer.flush()?;
+    Ok((frames, analysis, diags, es_offset))
+}
+
+fn make_analyzer(codec: Codec) -> Box<dyn AuAnalyzer> {
     match codec {
-        Codec::H264 => Ok(Box::new(H264Analyzer::new())),
-        Codec::H265 => Ok(Box::new(H265Analyzer::new())),
+        Codec::H264 => Box::new(H264Analyzer::new()),
+        Codec::H265 => Box::new(H265Analyzer::new()),
     }
 }
 
@@ -264,10 +237,13 @@ fn stream_info(
     props: streamlens_syntax::analyzer::StreamProps,
     path: &Path,
 ) -> StreamInfo {
-    let duration_ns = frames
+    // Containers rarely start at 0 (MPEG-TS PTS, edit lists).
+    let end = frames
         .iter()
         .filter_map(|f| Some(f.pts? + f.duration.unwrap_or(0)))
         .max();
+    let start = frames.iter().filter_map(|f| f.pts).min();
+    let duration_ns = end.zip(start).map(|(e, s)| e - s);
     StreamInfo {
         codec,
         profile: props.profile,

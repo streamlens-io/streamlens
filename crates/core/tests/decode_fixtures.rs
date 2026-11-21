@@ -205,16 +205,16 @@ fn indexer_cleans_up_with_session_drop() {
     assert!(!path.exists(), "ES cache not removed on drop");
 }
 
-/// Every frame of `name` decoded by ffmpeg, in display order (yuv420p luma
+/// Every frame of `path` decoded by ffmpeg, in display order (yuv420p luma
 /// only).
-fn ffmpeg_luma_frames(name: &str, w: usize, h: usize) -> Vec<Vec<u8>> {
+fn ffmpeg_luma_frames(path: &std::path::Path, w: usize, h: usize) -> Vec<Vec<u8>> {
     let out = std::process::Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
-        .arg(fixture(name))
+        .arg(path)
         .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
         .output()
         .expect("ffmpeg available");
-    assert!(out.status.success(), "ffmpeg failed on {name}");
+    assert!(out.status.success(), "ffmpeg failed on {}", path.display());
     out.stdout
         .chunks_exact(w * h * 3 / 2)
         .map(|f| f[..w * h].to_vec())
@@ -227,12 +227,17 @@ fn ffmpeg_luma_frames(name: &str, w: usize, h: usize) -> Vec<Vec<u8>> {
 /// display position — a frame labelled with the wrong decode index fails
 /// here even when its geometry and analysis look plausible.
 fn assert_seek_labels_match_ffmpeg(name: &str) {
-    let probe = Session::open(&fixture(name), |_| {}).unwrap();
+    assert_seek_labels_match_ffmpeg_at(&fixture(name));
+}
+
+fn assert_seek_labels_match_ffmpeg_at(path: &std::path::Path) {
+    let name = path.display();
+    let probe = Session::open(path, |_| {}).unwrap();
     let (w, h) = (
         probe.index.info.width as usize,
         probe.index.info.height as usize,
     );
-    let reference = ffmpeg_luma_frames(name, w, h);
+    let reference = ffmpeg_luma_frames(path, w, h);
     assert_eq!(reference.len(), probe.index.frames.len());
     let keyframes: Vec<u32> = probe
         .index
@@ -244,7 +249,7 @@ fn assert_seek_labels_match_ffmpeg(name: &str) {
     drop(probe);
 
     for (n, &k) in keyframes.iter().enumerate() {
-        let mut session = Session::open(&fixture(name), |_| {}).unwrap();
+        let mut session = Session::open(path, |_| {}).unwrap();
         let index = session.index.clone();
         let end = keyframes
             .get(n + 1)
@@ -270,7 +275,7 @@ fn assert_seek_labels_match_ffmpeg(name: &str) {
 
     // A direct seek to a leading picture must decode it from the previous
     // keyframe, not drop or mislabel it.
-    let probe = Session::open(&fixture(name), |_| {}).unwrap();
+    let probe = Session::open(path, |_| {}).unwrap();
     let leading: Vec<u32> = probe
         .index
         .frames
@@ -280,7 +285,7 @@ fn assert_seek_labels_match_ffmpeg(name: &str) {
         .collect();
     drop(probe);
     for t in leading {
-        let mut session = Session::open(&fixture(name), |_| {}).unwrap();
+        let mut session = Session::open(path, |_| {}).unwrap();
         let display = session.index.frames[t as usize].display_index as usize;
         let f = session
             .frame(t)
@@ -316,4 +321,39 @@ fn seek_labels_match_ffmpeg_h264_open_gop() {
 #[test]
 fn seek_labels_match_ffmpeg_hevc() {
     assert_seek_labels_match_ffmpeg("hevc_8bit.mp4");
+}
+
+#[test]
+fn seek_into_raw_es_with_parameter_sets_only_at_start() {
+    // Raw Annex B where SPS/PPS precede only the first IDR: a decode that
+    // starts at a later keyframe needs the indexer to re-insert them.
+    let data = std::fs::read(fixture("h264_prog.264")).unwrap();
+    let mut out = Vec::new();
+    let mut seen_slice = false;
+    for nal in streamlens_syntax::nal::iter_nals(&data) {
+        let t = nal.bytes[0] & 0x1F;
+        seen_slice |= t == 1 || t == 5;
+        if seen_slice && (t == 7 || t == 8) {
+            continue;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal.bytes);
+    }
+    let path = std::env::temp_dir().join(format!(
+        "streamlens-headers-once-{}.264",
+        std::process::id()
+    ));
+    std::fs::write(&path, &out).unwrap();
+
+    let session = Session::open(&path, |_| {}).unwrap();
+    let keyframes = session
+        .index
+        .frames
+        .iter()
+        .filter(|f| f.is_keyframe)
+        .count();
+    assert!(keyframes > 1, "fixture needs mid-stream keyframes");
+    drop(session);
+    assert_seek_labels_match_ffmpeg_at(&path);
+    std::fs::remove_file(&path).ok();
 }

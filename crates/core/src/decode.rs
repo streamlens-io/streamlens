@@ -89,7 +89,7 @@ impl LivePipeline {
         out: &mut Vec<DecodedFrame>,
     ) -> Result<bool, Error> {
         let Some(sample) = self.appsink.try_pull_sample(timeout) else {
-            crate::media::check_bus_error(&self.pipeline)?;
+            check_bus_error(&self.pipeline)?;
             return Ok(false);
         };
         if let Some(mut frame) = sample_to_frame(&sample)? {
@@ -464,4 +464,19 @@ fn copy_nv12(
     }
     image.planes.push(cb);
     image.planes.push(cr);
+}
+
+/// Non-blocking check for a posted pipeline error.
+fn check_bus_error(pipeline: &gst::Pipeline) -> Result<(), Error> {
+    let bus = pipeline.bus().expect("pipeline has bus");
+    while let Some(msg) = bus.pop_filtered(&[gst::MessageType::Error]) {
+        if let gst::MessageView::Error(e) = msg.view() {
+            return Err(Error::Pipeline(format!(
+                "{} ({})",
+                e.error(),
+                e.debug().unwrap_or_default()
+            )));
+        }
+    }
+    Ok(())
 }

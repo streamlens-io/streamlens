@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use streamlens_types::FrameType;
 
-use crate::analyzer::{AuAnalyzer, AuSummary, NalSummary, RecordedNal, StreamProps};
+use crate::analyzer::{
+    AuAnalyzer, AuSummary, NalSummary, ParameterSetStore, RecordedNal, StreamProps,
+};
 use crate::bitread::{BitReader, Recorder};
 use crate::diag::{Diagnostics, Severity};
 use crate::h264::sei::SeiPayload;
@@ -23,6 +25,7 @@ pub struct H264Analyzer {
     /// POC of the last non-IDR (recovery point) keyframe; pictures that
     /// follow it in decode order with a lower POC are its leading pictures.
     recovery_poc: Option<i32>,
+    param_sets: ParameterSetStore,
 }
 
 impl H264Analyzer {
@@ -80,6 +83,8 @@ impl AuAnalyzer for H264Analyzer {
                     NalType::Sps => {
                         let sps = h264::sps::parse_sps(&mut r)?;
                         self.active_sps.get_or_insert(sps.seq_parameter_set_id);
+                        self.param_sets
+                            .insert(raw_type, sps.seq_parameter_set_id, nal.bytes);
                         self.sps.insert(sps.seq_parameter_set_id, sps);
                     }
                     NalType::Pps => {
@@ -92,6 +97,8 @@ impl AuAnalyzer for H264Analyzer {
                             });
                         }
                         self.active_sps = Some(pps.seq_parameter_set_id);
+                        self.param_sets
+                            .insert(raw_type, pps.pic_parameter_set_id, nal.bytes);
                         self.pps.insert(pps.pic_parameter_set_id, pps);
                     }
                     NalType::Sei => {
@@ -162,6 +169,13 @@ impl AuAnalyzer for H264Analyzer {
             slice_count,
             ref_frames,
             nals,
+        })
+    }
+
+    fn insert_parameter_sets(&self, au: &[u8], summary: &mut AuSummary) -> Option<Vec<u8>> {
+        self.param_sets.splice(au, summary, &[7, 8], 9, |t| {
+            let n = NalType::from_raw(t);
+            (n.name(), n.is_vcl())
         })
     }
 

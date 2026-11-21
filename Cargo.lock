@@ -4313,6 +4313,7 @@ dependencies = [
  "log",
  "once_cell",
  "streamlens-types",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

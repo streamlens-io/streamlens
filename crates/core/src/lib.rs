@@ -5,7 +5,6 @@ pub mod cache;
 pub mod decode;
 pub mod index;
 pub mod indexer;
-pub mod media;
 pub mod metrics;
 pub mod playback;
 pub mod session;
@@ -27,6 +26,8 @@ pub enum Error {
     GstBool(#[from] gstreamer::glib::BoolError),
     #[error("pipeline state change failed: {0}")]
     StateChange(#[from] gstreamer::StateChangeError),
+    #[error("media: {0}")]
+    Media(#[from] streamlens_media::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("no H.264/H.265 video stream found in {0}")]
