@@ -200,7 +200,9 @@ impl DecodeService {
                      its references precede the stream and no decoder can produce it"
                 )));
             }
-            self.live = Some(self.start_at(start_keyframe_for(index, target))?);
+            let start = start_keyframe_for(index, target);
+            log::debug!("decoder restart at keyframe {start} for frame {target}");
+            self.live = Some(self.start_at(start)?);
         }
 
         let deadline = budget.map(|b| Instant::now() + b);
@@ -238,6 +240,11 @@ impl DecodeService {
             // through the decoder without the target: drain the held-back
             // pictures. A target that is still missing was dropped.
             if !live.finish_sent && (live.fed >= n || live.consumed == live.fed) {
+                log::debug!(
+                    "draining decoder for frame {target} (fed up to {}, stream end: {})",
+                    live.fed,
+                    live.fed >= n
+                );
                 send(&live.input, Input::Finish)?;
                 live.finish_sent = true;
             }
