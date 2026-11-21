@@ -41,7 +41,7 @@ pub enum Error {
 /// call before using anything else in this crate.
 pub fn init() -> Result<(), Error> {
     gstreamer::init()?;
-    streamlens_gst::register_static()?;
+    streamlens_media::register_static()?;
     Ok(())
 }
 

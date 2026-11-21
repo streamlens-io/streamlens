@@ -390,7 +390,7 @@ fn sample_to_frame(sample: &gst::Sample) -> Result<Option<DecodedFrame>, Error> 
     let Some(buffer) = sample.buffer_owned() else {
         return Ok(None);
     };
-    let analysis = streamlens_gst::analysis_from_buffer(&buffer);
+    let analysis = streamlens_media::analysis_from_buffer(&buffer);
     let frame = gstreamer_video::VideoFrame::from_buffer_readable(buffer, &info)
         .map_err(|_| Error::Pipeline("unmappable video frame".into()))?;
 

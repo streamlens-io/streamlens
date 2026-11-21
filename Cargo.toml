@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/types",
     "crates/syntax",
-    "crates/gst",
+    "crates/media",
     "crates/core",
     "crates/app",
 ]
@@ -17,7 +17,7 @@ repository = "https://github.com/axeltob/streamlens"
 [workspace.dependencies]
 streamlens-types = { path = "crates/types" }
 streamlens-syntax = { path = "crates/syntax" }
-streamlens-gst = { path = "crates/gst" }
+streamlens-media = { path = "crates/media" }
 streamlens-core = { path = "crates/core" }
 
 gstreamer = "0.25"

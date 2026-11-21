@@ -4,7 +4,7 @@ use gstreamer_app as gst_app;
 
 fn init() {
     gst::init().unwrap();
-    streamlens_gst::register_static().unwrap();
+    streamlens_media::register_static().unwrap();
 }
 
 /// Run a simple decode pipeline and collect all output buffers.
@@ -46,7 +46,7 @@ fn h265_has_analysis_meta_on_every_buffer() {
     assert!(!buffers.is_empty(), "no frames decoded");
     for buf in &buffers {
         assert!(
-            streamlens_gst::analysis_from_buffer(buf).is_some(),
+            streamlens_media::analysis_from_buffer(buf).is_some(),
             "buffer missing AnalysisMeta"
         );
     }
@@ -79,7 +79,7 @@ fn h265_first_frame_all_intra() {
     assert!(!buffers.is_empty());
 
     // Find the frame with poc=0 (the first in decode order).
-    let analysis = streamlens_gst::analysis_from_buffer(&buffers[0])
+    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
         .expect("first buffer has no AnalysisMeta");
 
     assert_eq!(analysis.width, 320);
@@ -132,7 +132,7 @@ fn h265_later_frame_has_inter_with_nonzero_mvs() {
     );
 
     let found = buffers.iter().skip(1).any(|buf| {
-        let analysis = match streamlens_gst::analysis_from_buffer(buf) {
+        let analysis = match streamlens_media::analysis_from_buffer(buf) {
             Some(a) => a,
             None => return false,
         };
@@ -173,7 +173,7 @@ fn h264_has_analysis_meta_on_every_buffer() {
     assert!(!buffers.is_empty(), "no frames decoded");
     for buf in &buffers {
         assert!(
-            streamlens_gst::analysis_from_buffer(buf).is_some(),
+            streamlens_media::analysis_from_buffer(buf).is_some(),
             "buffer missing AnalysisMeta"
         );
     }
@@ -189,7 +189,7 @@ fn h264_first_frame_all_intra_300_superblocks() {
     );
     assert!(!buffers.is_empty());
 
-    let analysis = streamlens_gst::analysis_from_buffer(&buffers[0])
+    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
         .expect("first buffer has no AnalysisMeta");
 
     // 320x240 → 20x15 = 300 superblocks (macroblocks).
@@ -225,7 +225,7 @@ fn h264_later_frames_have_skip_and_inter_with_nonzero_mvs() {
     );
 
     let found_skip = buffers.iter().skip(1).any(|buf| {
-        streamlens_gst::analysis_from_buffer(buf)
+        streamlens_media::analysis_from_buffer(buf)
             .as_ref()
             .map(|a| {
                 a.cus
@@ -236,7 +236,7 @@ fn h264_later_frames_have_skip_and_inter_with_nonzero_mvs() {
     });
 
     let found_inter_nz = buffers.iter().skip(1).any(|buf| {
-        streamlens_gst::analysis_from_buffer(buf)
+        streamlens_media::analysis_from_buffer(buf)
             .as_ref()
             .map(|a| {
                 a.superblocks.iter().any(|sb| {
@@ -274,7 +274,7 @@ fn h264_slice_index_takes_two_distinct_values() {
 
     // Check that at least one frame has superblocks with 2 distinct slice_index values.
     let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_gst::analysis_from_buffer(buf) {
+        let analysis = match streamlens_media::analysis_from_buffer(buf) {
             Some(a) => a,
             None => return false,
         };
@@ -299,7 +299,7 @@ fn h264_first_frame_mb_bits_plausible() {
     );
     assert!(!buffers.is_empty());
 
-    let analysis = streamlens_gst::analysis_from_buffer(&buffers[0])
+    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
         .expect("first buffer has no AnalysisMeta");
 
     // 320x240 → 300 MBs.
@@ -353,7 +353,7 @@ fn h264_stages_predicted_non_flat() {
 
     // At least one frame's predicted luma plane must have more than one distinct value.
     let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_gst::analysis_from_buffer(buf) {
+        let analysis = match streamlens_media::analysis_from_buffer(buf) {
             Some(a) => a,
             None => return false,
         };
@@ -387,7 +387,7 @@ fn h264_stages_unfiltered_present() {
 
     for buf in &buffers {
         let analysis =
-            streamlens_gst::analysis_from_buffer(buf).expect("buffer missing AnalysisMeta");
+            streamlens_media::analysis_from_buffer(buf).expect("buffer missing AnalysisMeta");
         assert!(
             analysis.stages.unfiltered.is_some(),
             "unfiltered stage plane missing from a frame"
@@ -408,7 +408,7 @@ fn h264_stages_frame0_unfiltered_vs_final_differ() {
 
     let buf = &sl_buffers[0];
     let analysis =
-        streamlens_gst::analysis_from_buffer(buf).expect("first buffer missing AnalysisMeta");
+        streamlens_media::analysis_from_buffer(buf).expect("first buffer missing AnalysisMeta");
     let unfilt = analysis
         .stages
         .unfiltered
@@ -466,7 +466,7 @@ fn h264_stages_residual_nonzero() {
     assert!(!buffers.is_empty());
 
     let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_gst::analysis_from_buffer(buf) {
+        let analysis = match streamlens_media::analysis_from_buffer(buf) {
             Some(a) => a,
             None => return false,
         };
@@ -551,7 +551,7 @@ fn h265_stages_predicted_non_flat() {
     );
     assert!(!buffers.is_empty());
 
-    let analysis = streamlens_gst::analysis_from_buffer(&buffers[0])
+    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
         .expect("first buffer has no AnalysisMeta");
 
     let predicted = analysis
@@ -584,7 +584,7 @@ fn h265_stages_residual_nonzero_and_small() {
 
     // Find a frame with nonzero residual.
     let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_gst::analysis_from_buffer(buf) {
+        let analysis = match streamlens_media::analysis_from_buffer(buf) {
             Some(a) => a,
             None => return false,
         };
@@ -620,7 +620,7 @@ fn h265_stages_unfiltered_differs_from_decoded() {
     assert!(!buffers.is_empty());
 
     let buf = &buffers[0];
-    let analysis = streamlens_gst::analysis_from_buffer(buf).expect("no AnalysisMeta on frame 0");
+    let analysis = streamlens_media::analysis_from_buffer(buf).expect("no AnalysisMeta on frame 0");
 
     let unfiltered = analysis
         .stages
@@ -678,7 +678,7 @@ fn h265_ctb_bits_plausible_frame0() {
     assert!(!buffers.is_empty());
 
     let analysis =
-        streamlens_gst::analysis_from_buffer(&buffers[0]).expect("no AnalysisMeta on frame 0");
+        streamlens_media::analysis_from_buffer(&buffers[0]).expect("no AnalysisMeta on frame 0");
 
     let nb_cus = analysis.cus.len();
     assert!(nb_cus > 0, "no CUs in frame 0");
@@ -730,7 +730,7 @@ fn h265_poc_frame0_is_zero() {
 
     // Frame 0 (first output) should have poc==0.
     let analysis =
-        streamlens_gst::analysis_from_buffer(&buffers[0]).expect("no AnalysisMeta on frame 0");
+        streamlens_media::analysis_from_buffer(&buffers[0]).expect("no AnalysisMeta on frame 0");
 
     assert_eq!(
         analysis.poc, 0,
@@ -742,7 +742,7 @@ fn h265_poc_frame0_is_zero() {
     // (the output is in display order from GStreamer).
     let pocs: Vec<i32> = buffers
         .iter()
-        .filter_map(streamlens_gst::analysis_from_buffer)
+        .filter_map(streamlens_media::analysis_from_buffer)
         .map(|a| a.poc)
         .collect();
 
