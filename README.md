@@ -46,27 +46,10 @@ On macOS, `just bundle` assembles `target/StreamLens.app` (proper Dock name
 and icon). `just check` runs fmt, clippy and the tests;
 `vendor/smoke/run.sh` runs the C smoke tests of the decoder patches.
 
-The script downloads FFmpeg and libde265 at pinned commits, applies the
-patches from `vendor/patches/` (which add per-block analysis export), and
-installs static libraries into `vendor/`. Nothing is installed
-system-wide.
-
-## Debug hooks
-
-Environment variables that put the app in a given state at startup (for
-testing and screenshots):
-
-| Variable | Effect |
-|---|---|
-| `STREAMLENS_WINDOW=WxH` | Initial window size |
-| `STREAMLENS_START_FRAME=N` | Open at decode index N |
-| `STREAMLENS_ZOOM=Z` | Open zoomed to Z |
-| `STREAMLENS_PLAY=1` | Start playback |
-| `STREAMLENS_STAGE=predicted\|unfiltered\|residual` | Reconstruction stage shown |
-| `STREAMLENS_TAB=stream\|headers\|stats` | Side panel tab |
-| `STREAMLENS_OVERLAYS=partitions,mv,types,qp,sizes,slices,values` | Overlays on |
-| `STREAMLENS_BITS_SPLIT=1` | Chart bars split into intra/inter/skip bits |
-| `STREAMLENS_SETTINGS_OPEN=1` | Open with the settings dialog shown |
+The script downloads FFmpeg (a pinned release) and libde265 (a pinned
+commit), applies the patches from `vendor/patches/` (which add per-block
+analysis export), and installs static libraries into `vendor/`. Nothing is
+installed system-wide.
 
 ## Note on current state
 This is a work-in-progress. I had a personal need for this, and the existing products were simply way too expensive.

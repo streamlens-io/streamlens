@@ -4,7 +4,9 @@ H.264/H.265 bitstream analyzer. libavformat demuxing, patched
 decoders exposing per-block internals, iced 0.14 + wgpu UI. Read
 `docs/ARCHITECTURE.md` before touching anything non-trivial; it has the
 crate map, data flow, and a file-by-file reading order. `README.md` has
-build/run/usage and the `STREAMLENS_*` debug env hooks.
+build/run/usage. The `STREAMLENS_*` debug env hooks (start frame, stage,
+tab, overlays, bits split, zoom, play, settings dialog, window size) are read in
+`crates/app/src/app/mod.rs`, `update.rs` and `main.rs`.
 
 ## Hard rules
 
