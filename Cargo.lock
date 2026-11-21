@@ -3965,7 +3965,6 @@ dependencies = [
  "serde",
  "serde_json",
  "streamlens-core",
- "streamlens-syntax",
  "streamlens-types",
  "winresource",
 ]

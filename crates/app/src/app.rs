@@ -127,7 +127,7 @@ pub struct App {
 
     tab: Tab,
     /// Headers of the current frame (None while loading).
-    headers: Option<(u32, Arc<Vec<streamlens_syntax::analyzer::RecordedNal>>)>,
+    headers: Option<(u32, Arc<Vec<streamlens_core::RecordedNal>>)>,
     header_expanded: HashSet<Vec<usize>>,
     header_filter: String,
 

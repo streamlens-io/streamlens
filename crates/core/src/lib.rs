@@ -15,6 +15,9 @@ pub use index::{IndexProgress, StreamIndex};
 pub use indexer::Indexer;
 pub use playback::Playback;
 pub use session::Session;
+/// Syntax trees for the Headers panel; re-exported so the UI depends on
+/// core only.
+pub use streamlens_syntax::{analyzer::RecordedNal, FieldNode};
 pub use sweep::{Sweep, SweepFrame};
 
 /// Errors surfaced to the UI.

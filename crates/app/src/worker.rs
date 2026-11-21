@@ -46,7 +46,7 @@ pub enum Event {
     },
     Opened(Arc<StreamIndex>),
     Frame(Arc<DecodedFrame>),
-    Headers(u32, Arc<Vec<streamlens_syntax::analyzer::RecordedNal>>),
+    Headers(u32, Arc<Vec<streamlens_core::RecordedNal>>),
     /// Playback reached the last frame (or failed) and stopped.
     PlayEnded,
     /// A batch of sweep results arrived.

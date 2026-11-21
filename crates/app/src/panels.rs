@@ -7,8 +7,7 @@ use std::sync::Arc;
 use iced::widget::{button, column, container, row, scrollable, text, Column};
 use iced::{Element, Fill};
 use streamlens_core::StreamIndex;
-use streamlens_syntax::analyzer::RecordedNal;
-use streamlens_syntax::FieldNode;
+use streamlens_core::{FieldNode, RecordedNal};
 use streamlens_types::{FrameAnalysis, FrameType, PredMode};
 
 use crate::app::Message;
