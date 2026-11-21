@@ -17,7 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -35,7 +35,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache vendored decoders
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             vendor/ffmpeg-prefix
@@ -67,7 +67,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # MSYS2's Rust targets x86_64-pc-windows-gnu and shares the MinGW
       # toolchain that builds the decoders. ffmpeg is the pixel reference
@@ -87,7 +87,7 @@ jobs:
             mingw-w64-x86_64-ffmpeg
 
       - name: Cache vendored decoders
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             vendor/ffmpeg-prefix
