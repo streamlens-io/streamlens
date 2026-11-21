@@ -20,12 +20,6 @@ pub use sweep::{Sweep, SweepFrame};
 /// Errors surfaced to the UI.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("gstreamer: {0}")]
-    Gst(#[from] gstreamer::glib::Error),
-    #[error("gstreamer: {0}")]
-    GstBool(#[from] gstreamer::glib::BoolError),
-    #[error("pipeline state change failed: {0}")]
-    StateChange(#[from] gstreamer::StateChangeError),
     #[error("media: {0}")]
     Media(#[from] streamlens_media::Error),
     #[error("io: {0}")]
@@ -36,14 +30,6 @@ pub enum Error {
     Pipeline(String),
     #[error("unsupported codec: {0}")]
     UnsupportedCodec(String),
-}
-
-/// Initializes GStreamer and registers the streamlens elements. Idempotent;
-/// call before using anything else in this crate.
-pub fn init() -> Result<(), Error> {
-    gstreamer::init()?;
-    streamlens_media::register_static()?;
-    Ok(())
 }
 
 /// Positioned read (pread): fills `buf` from `offset` without depending on

@@ -11,8 +11,6 @@ fn fixture(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn sweep_all_frames_present_nonzero_bits() {
-    streamlens_core::init().unwrap();
-
     let results: Arc<Mutex<Vec<(u32, SweepFrame)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
 
@@ -75,8 +73,6 @@ fn sweep_all_frames_present_nonzero_bits() {
 
 #[test]
 fn sweep_psnr_with_reference() {
-    streamlens_core::init().unwrap();
-
     let results: Arc<Mutex<Vec<(u32, SweepFrame)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
 

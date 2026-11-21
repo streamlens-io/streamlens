@@ -1,86 +1,92 @@
-use gst::prelude::*;
-use gstreamer as gst;
-use gstreamer_app as gst_app;
+//! Analysis decoders fed straight from the demuxer: tags, analysis content,
+//! stage planes, and bit-exact pixels against the ffmpeg CLI.
 
-fn init() {
-    gst::init().unwrap();
-    streamlens_media::register_static().unwrap();
+use streamlens_media::{open_decoder, Demuxer, Picture};
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures")).join(name)
 }
 
-/// Run a simple decode pipeline and collect all output buffers.
-fn decode_buffers(pipeline_str: &str) -> Vec<gst::Buffer> {
-    let pipeline = gst::parse::launch(pipeline_str)
-        .expect("failed to parse pipeline")
-        .downcast::<gst::Pipeline>()
-        .unwrap();
-
-    let appsink = pipeline
-        .by_name("sink")
-        .unwrap()
-        .downcast::<gst_app::AppSink>()
-        .unwrap();
-
-    pipeline.set_state(gst::State::Playing).unwrap();
-
-    let mut buffers = Vec::new();
-    while let Ok(sample) = appsink.pull_sample() {
-        if let Some(buf) = sample.buffer_owned() {
-            buffers.push(buf);
-        }
+/// Decodes a whole fixture; pictures in output (display) order. Each AU is
+/// tagged with its decode index.
+fn decode_all(name: &str, stages: bool) -> Vec<Picture> {
+    let mut demuxer = Demuxer::open(&fixture(name)).expect("open fixture");
+    let mut decoder = open_decoder(demuxer.codec(), stages).expect("open decoder");
+    let mut out = Vec::new();
+    let mut tag = 0;
+    while let Some(au) = demuxer.read().expect("demux") {
+        decoder.decode(au.data, tag, &mut out).expect("decode");
+        tag += 1;
     }
+    decoder.finish(&mut out).expect("finish");
+    out
+}
 
-    pipeline.set_state(gst::State::Null).unwrap();
-    buffers
+/// Every frame ffmpeg decodes from the fixture, as raw planar bytes in
+/// display order.
+fn ffmpeg_frames(name: &str, pix_fmt: &str, frame_bytes: usize) -> Vec<Vec<u8>> {
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(fixture(name))
+        .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"])
+        .output()
+        .expect("ffmpeg available");
+    assert!(out.status.success(), "ffmpeg failed on {name}");
+    out.stdout
+        .chunks_exact(frame_bytes)
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+fn assert_pixels_match_ffmpeg(name: &str, pix_fmt: &str) {
+    let pictures = decode_all(name, false);
+    let frame_bytes: usize = pictures[0].image.planes.iter().map(Vec::len).sum();
+    let reference = ffmpeg_frames(name, pix_fmt, frame_bytes);
+    assert_eq!(pictures.len(), reference.len(), "{name}: frame count");
+    for (i, (p, r)) in pictures.iter().zip(&reference).enumerate() {
+        assert!(
+            p.image.planes.concat() == *r,
+            "{name}: output frame {i} (tag {}) differs from ffmpeg",
+            p.tag
+        );
+    }
+}
+
+fn assert_every_tag_comes_back(name: &str) {
+    let pictures = decode_all(name, false);
+    let mut tags: Vec<u32> = pictures.iter().map(|p| p.tag).collect();
+    tags.sort_unstable();
+    let expected: Vec<u32> = (0..pictures.len() as u32).collect();
+    assert_eq!(tags, expected, "{name}: each AU's tag exactly once");
 }
 
 // ─── H.265 tests ──────────────────────────────────────────────────────────────
 
 #[test]
-fn h265_has_analysis_meta_on_every_buffer() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty(), "no frames decoded");
-    for buf in &buffers {
-        assert!(
-            streamlens_media::analysis_from_buffer(buf).is_some(),
-            "buffer missing AnalysisMeta"
-        );
-    }
+fn h265_every_tag_comes_back() {
+    assert_every_tag_comes_back("hevc_8bit.265");
+    assert_every_tag_comes_back("hevc_8bit.mp4");
+    assert_every_tag_comes_back("hevc_10bit.mkv");
 }
 
 #[test]
 fn h265_75_frames() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
+    let pictures = decode_all("hevc_8bit.265", false);
     assert_eq!(
-        buffers.len(),
+        pictures.len(),
         75,
         "expected 75 frames, got {}",
-        buffers.len()
+        pictures.len()
     );
 }
 
 #[test]
 fn h265_first_frame_all_intra() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("hevc_8bit.265", false);
+    assert!(!pictures.is_empty());
 
     // Find the frame with poc=0 (the first in decode order).
-    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
-        .expect("first buffer has no AnalysisMeta");
+    let analysis = &pictures[0].analysis;
 
     assert_eq!(analysis.width, 320);
     assert_eq!(analysis.height, 240);
@@ -124,18 +130,10 @@ fn h265_first_frame_all_intra() {
 
 #[test]
 fn h265_later_frame_has_inter_with_nonzero_mvs() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
+    let pictures = decode_all("hevc_8bit.265", false);
 
-    let found = buffers.iter().skip(1).any(|buf| {
-        let analysis = match streamlens_media::analysis_from_buffer(buf) {
-            Some(a) => a,
-            None => return false,
-        };
+    let found = pictures.iter().skip(1).any(|p| {
+        let analysis = &p.analysis;
         analysis.superblocks.iter().any(|sb| {
             analysis.cus_of(sb).iter().any(|cu| {
                 matches!(
@@ -163,34 +161,19 @@ fn h265_later_frame_has_inter_with_nonzero_mvs() {
 // ─── H.264 tests ──────────────────────────────────────────────────────────────
 
 #[test]
-fn h264_has_analysis_meta_on_every_buffer() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty(), "no frames decoded");
-    for buf in &buffers {
-        assert!(
-            streamlens_media::analysis_from_buffer(buf).is_some(),
-            "buffer missing AnalysisMeta"
-        );
-    }
+fn h264_every_tag_comes_back() {
+    assert_every_tag_comes_back("h264_prog.264");
+    assert_every_tag_comes_back("h264_prog.mp4");
+    assert_every_tag_comes_back("h264.ts");
+    assert_every_tag_comes_back("h264_interlaced.264");
 }
 
 #[test]
 fn h264_first_frame_all_intra_300_superblocks() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("h264_prog.264", false);
+    assert!(!pictures.is_empty());
 
-    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
-        .expect("first buffer has no AnalysisMeta");
+    let analysis = &pictures[0].analysis;
 
     // 320x240 → 20x15 = 300 superblocks (macroblocks).
     assert_eq!(
@@ -217,42 +200,29 @@ fn h264_first_frame_all_intra_300_superblocks() {
 
 #[test]
 fn h264_later_frames_have_skip_and_inter_with_nonzero_mvs() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
+    let pictures = decode_all("h264_prog.264", false);
 
-    let found_skip = buffers.iter().skip(1).any(|buf| {
-        streamlens_media::analysis_from_buffer(buf)
-            .as_ref()
-            .map(|a| {
-                a.cus
-                    .iter()
-                    .any(|cu| matches!(cu.pred, streamlens_types::analysis::PredMode::Skip))
-            })
-            .unwrap_or(false)
+    let found_skip = pictures.iter().skip(1).any(|p| {
+        let a = &p.analysis;
+        a.cus
+            .iter()
+            .any(|cu| matches!(cu.pred, streamlens_types::analysis::PredMode::Skip))
     });
 
-    let found_inter_nz = buffers.iter().skip(1).any(|buf| {
-        streamlens_media::analysis_from_buffer(buf)
-            .as_ref()
-            .map(|a| {
-                a.superblocks.iter().any(|sb| {
-                    a.cus_of(sb).iter().any(|cu| {
-                        matches!(cu.pred, streamlens_types::analysis::PredMode::Inter)
-                            && a.pus_of(cu).iter().any(|pu| {
-                                pu.inter
-                                    .as_ref()
-                                    .and_then(|ii| ii.mv[0])
-                                    .map(|mv| mv.x != 0 || mv.y != 0)
-                                    .unwrap_or(false)
-                            })
+    let found_inter_nz = pictures.iter().skip(1).any(|p| {
+        let a = &p.analysis;
+        a.superblocks.iter().any(|sb| {
+            a.cus_of(sb).iter().any(|cu| {
+                matches!(cu.pred, streamlens_types::analysis::PredMode::Inter)
+                    && a.pus_of(cu).iter().any(|pu| {
+                        pu.inter
+                            .as_ref()
+                            .and_then(|ii| ii.mv[0])
+                            .map(|mv| mv.x != 0 || mv.y != 0)
+                            .unwrap_or(false)
                     })
-                })
             })
-            .unwrap_or(false)
+        })
     });
 
     assert!(found_skip, "no Skip MBs found in later frames");
@@ -264,20 +234,12 @@ fn h264_later_frames_have_skip_and_inter_with_nonzero_mvs() {
 
 #[test]
 fn h264_slice_index_takes_two_distinct_values() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("h264_prog.264", false);
+    assert!(!pictures.is_empty());
 
     // Check that at least one frame has superblocks with 2 distinct slice_index values.
-    let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_media::analysis_from_buffer(buf) {
-            Some(a) => a,
-            None => return false,
-        };
+    let found = pictures.iter().any(|p| {
+        let analysis = &p.analysis;
         let indices: std::collections::HashSet<u16> = analysis
             .superblocks
             .iter()
@@ -291,16 +253,10 @@ fn h264_slice_index_takes_two_distinct_values() {
 
 #[test]
 fn h264_first_frame_mb_bits_plausible() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("h264_prog.264", false);
+    assert!(!pictures.is_empty());
 
-    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
-        .expect("first buffer has no AnalysisMeta");
+    let analysis = &pictures[0].analysis;
 
     // 320x240 → 300 MBs.
     let nb_cu = analysis.cus.len();
@@ -343,20 +299,12 @@ fn h264_first_frame_mb_bits_plausible() {
 
 #[test]
 fn h264_stages_predicted_non_flat() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("h264_prog.264", true);
+    assert!(!pictures.is_empty());
 
     // At least one frame's predicted luma plane must have more than one distinct value.
-    let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_media::analysis_from_buffer(buf) {
-            Some(a) => a,
-            None => return false,
-        };
+    let found = pictures.iter().any(|p| {
+        let analysis = &p.analysis;
         if let Some(pred) = &analysis.stages.predicted {
             let y = &pred.planes[0];
             if y.is_empty() {
@@ -377,17 +325,11 @@ fn h264_stages_predicted_non_flat() {
 
 #[test]
 fn h264_stages_unfiltered_present() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("h264_prog.264", true);
+    assert!(!pictures.is_empty());
 
-    for buf in &buffers {
-        let analysis =
-            streamlens_media::analysis_from_buffer(buf).expect("buffer missing AnalysisMeta");
+    for p in &pictures {
+        let analysis = &p.analysis;
         assert!(
             analysis.stages.unfiltered.is_some(),
             "unfiltered stage plane missing from a frame"
@@ -397,31 +339,21 @@ fn h264_stages_unfiltered_present() {
 
 #[test]
 fn h264_stages_frame0_unfiltered_vs_final_differ() {
-    init();
+    let pictures = decode_all("h264_prog.264", true);
+    assert!(!pictures.is_empty());
 
-    let sl_buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw,format=I420\"",
-    );
-    assert!(!sl_buffers.is_empty());
-
-    let buf = &sl_buffers[0];
-    let analysis =
-        streamlens_media::analysis_from_buffer(buf).expect("first buffer missing AnalysisMeta");
+    let p = &pictures[0];
+    let analysis = &p.analysis;
     let unfilt = analysis
         .stages
         .unfiltered
         .as_ref()
         .expect("no unfiltered stage on frame 0");
 
-    // Read luma from the final decoded output buffer.
+    // Final decoded luma.
     let width = analysis.width as usize;
     let height = analysis.height as usize;
-    let final_y: Vec<u8> = {
-        let buf_map = buf.map_readable().unwrap();
-        buf_map.as_slice()[..width * height].to_vec()
-    };
+    let final_y = &p.image.planes[0];
 
     let unfilt_y = &unfilt.planes[0];
     assert_eq!(
@@ -457,19 +389,11 @@ fn h264_stages_frame0_unfiltered_vs_final_differ() {
 
 #[test]
 fn h264_stages_residual_nonzero() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("h264_prog.264", true);
+    assert!(!pictures.is_empty());
 
-    let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_media::analysis_from_buffer(buf) {
-            Some(a) => a,
-            None => return false,
-        };
+    let found = pictures.iter().any(|p| {
+        let analysis = &p.analysis;
         analysis
             .stages
             .residual
@@ -483,76 +407,25 @@ fn h264_stages_residual_nonzero() {
 // ─── Pixel correctness tests ──────────────────────────────────────────────────
 
 #[test]
-fn h264_pixel_correctness_frame0() {
-    init();
-
-    // Decode with slh264dec.
-    let sl_buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! slh264dec \
-         ! appsink name=sink caps=\"video/x-raw,format=I420\"",
-    );
-
-    // Decode with stock avdec_h264.
-    let av_buffers = decode_buffers(
-        "filesrc location=../../fixtures/h264_prog.264 \
-         ! h264parse ! avdec_h264 \
-         ! appsink name=sink caps=\"video/x-raw,format=I420\"",
-    );
-
-    assert!(!sl_buffers.is_empty() && !av_buffers.is_empty());
-
-    // Compare luma plane of frame 0 bit-exactly.
-    let sl_map = sl_buffers[0].map_readable().unwrap();
-    let av_map = av_buffers[0].map_readable().unwrap();
-    assert_eq!(
-        sl_map.as_slice(),
-        av_map.as_slice(),
-        "frame 0 pixel data differs between slh264dec and avdec_h264"
-    );
+fn h264_pixels_match_ffmpeg() {
+    assert_pixels_match_ffmpeg("h264_prog.264", "yuv420p");
+    assert_pixels_match_ffmpeg("h264_interlaced.264", "yuv420p");
 }
 
 #[test]
-fn h265_pixel_correctness_frame0() {
-    init();
-
-    let sl_buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw,format=I420\"",
-    );
-
-    let av_buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! avdec_h265 \
-         ! appsink name=sink caps=\"video/x-raw,format=I420\"",
-    );
-
-    assert!(!sl_buffers.is_empty() && !av_buffers.is_empty());
-
-    let sl_map = sl_buffers[0].map_readable().unwrap();
-    let av_map = av_buffers[0].map_readable().unwrap();
-    assert_eq!(
-        sl_map.as_slice(),
-        av_map.as_slice(),
-        "frame 0 pixel data differs between slh265dec and avdec_h265"
-    );
+fn h265_pixels_match_ffmpeg() {
+    assert_pixels_match_ffmpeg("hevc_8bit.265", "yuv420p");
+    assert_pixels_match_ffmpeg("hevc_10bit.mkv", "yuv420p10le");
 }
 
 // ─── H.265 stage planes and internals tests ────────────────────────────────────
 
 #[test]
 fn h265_stages_predicted_non_flat() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("hevc_8bit.265", true);
+    assert!(!pictures.is_empty());
 
-    let analysis = streamlens_media::analysis_from_buffer(&buffers[0])
-        .expect("first buffer has no AnalysisMeta");
+    let analysis = &pictures[0].analysis;
 
     let predicted = analysis
         .stages
@@ -574,20 +447,12 @@ fn h265_stages_predicted_non_flat() {
 
 #[test]
 fn h265_stages_residual_nonzero_and_small() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("hevc_8bit.265", true);
+    assert!(!pictures.is_empty());
 
     // Find a frame with nonzero residual.
-    let found = buffers.iter().any(|buf| {
-        let analysis = match streamlens_media::analysis_from_buffer(buf) {
-            Some(a) => a,
-            None => return false,
-        };
+    let found = pictures.iter().any(|p| {
+        let analysis = &p.analysis;
         let residual = match analysis.stages.residual.as_ref() {
             Some(r) => r,
             None => return false,
@@ -610,17 +475,12 @@ fn h265_stages_residual_nonzero_and_small() {
 
 #[test]
 fn h265_stages_unfiltered_differs_from_decoded() {
-    init();
     // The hevc_8bit fixture must have SAO or deblocking enabled (default for Main profile).
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec stages=true \
-         ! appsink name=sink caps=\"video/x-raw,format=I420\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("hevc_8bit.265", true);
+    assert!(!pictures.is_empty());
 
-    let buf = &buffers[0];
-    let analysis = streamlens_media::analysis_from_buffer(buf).expect("no AnalysisMeta on frame 0");
+    let p = &pictures[0];
+    let analysis = &p.analysis;
 
     let unfiltered = analysis
         .stages
@@ -630,10 +490,7 @@ fn h265_stages_unfiltered_differs_from_decoded() {
 
     let width = analysis.width as usize;
     let height = analysis.height as usize;
-    let final_y: Vec<u8> = {
-        let buf_map = buf.map_readable().unwrap();
-        buf_map.as_slice()[..width * height].to_vec()
-    };
+    let final_y = &p.image.planes[0];
 
     let unfilt_y = &unfiltered.planes[0];
     assert_eq!(
@@ -669,16 +526,10 @@ fn h265_stages_unfiltered_differs_from_decoded() {
 
 #[test]
 fn h265_ctb_bits_plausible_frame0() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("hevc_8bit.265", false);
+    assert!(!pictures.is_empty());
 
-    let analysis =
-        streamlens_media::analysis_from_buffer(&buffers[0]).expect("no AnalysisMeta on frame 0");
+    let analysis = &pictures[0].analysis;
 
     let nb_cus = analysis.cus.len();
     assert!(nb_cus > 0, "no CUs in frame 0");
@@ -720,17 +571,11 @@ fn h265_ctb_bits_plausible_frame0() {
 
 #[test]
 fn h265_poc_frame0_is_zero() {
-    init();
-    let buffers = decode_buffers(
-        "filesrc location=../../fixtures/hevc_8bit.265 \
-         ! h265parse ! slh265dec \
-         ! appsink name=sink caps=\"video/x-raw\"",
-    );
-    assert!(!buffers.is_empty());
+    let pictures = decode_all("hevc_8bit.265", false);
+    assert!(!pictures.is_empty());
 
     // Frame 0 (first output) should have poc==0.
-    let analysis =
-        streamlens_media::analysis_from_buffer(&buffers[0]).expect("no AnalysisMeta on frame 0");
+    let analysis = &pictures[0].analysis;
 
     assert_eq!(
         analysis.poc, 0,
@@ -739,12 +584,8 @@ fn h265_poc_frame0_is_zero() {
     );
 
     // POC values must be non-negative and increase monotonically in display order
-    // (the output is in display order from GStreamer).
-    let pocs: Vec<i32> = buffers
-        .iter()
-        .filter_map(streamlens_media::analysis_from_buffer)
-        .map(|a| a.poc)
-        .collect();
+    // (decoders output in display order).
+    let pocs: Vec<i32> = pictures.iter().map(|p| p.analysis.poc).collect();
 
     assert!(!pocs.is_empty());
     // All POCs should be >= 0.

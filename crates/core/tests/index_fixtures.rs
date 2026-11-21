@@ -8,7 +8,6 @@ fn fixture(name: &str) -> std::path::PathBuf {
 }
 
 fn index(name: &str) -> streamlens_core::StreamIndex {
-    streamlens_core::init().unwrap();
     let mut called = false;
     let (idx, _analyzer) = Indexer::default()
         .index(&fixture(name), |_| called = true)

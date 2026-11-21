@@ -69,7 +69,6 @@ impl Session {
     /// Indexes `path` and prepares decoding. Blocking; run on a worker
     /// thread and forward `progress` to the UI.
     pub fn open(path: &Path, progress: impl FnMut(IndexProgress)) -> Result<Self, Error> {
-        crate::init()?;
         let (index, analyzer) = Indexer::default().index(path, progress)?;
         let decode = DecodeService::new(&index)?;
         let es_file = std::fs::File::open(&index.es_cache_path)?;
