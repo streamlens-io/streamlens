@@ -106,31 +106,21 @@ fn main() {
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
 
+    // FFmpeg is configured with --disable-autodetect: no zlib, no system
+    // frameworks. libde265 is C++.
     match target_os.as_str() {
-        // libde265 is C++: libc++ on macOS, libstdc++ elsewhere.
         "macos" => {
             println!("cargo:rustc-link-lib=c++");
-            for fw in [
-                "CoreFoundation",
-                "CoreVideo",
-                "CoreMedia",
-                "VideoToolbox",
-                "CoreServices",
-            ] {
-                println!("cargo:rustc-link-lib=framework={fw}");
-            }
-            println!("cargo:rustc-link-lib=z");
             println!("cargo:rustc-link-lib=m");
         }
-        // MinGW (x86_64-pc-windows-gnu): no separate libm/libz, and
-        // libavutil's random_seed uses BCryptGenRandom.
+        // MinGW (x86_64-pc-windows-gnu): no separate libm, and libavutil's
+        // random_seed uses BCryptGenRandom.
         "windows" => {
             println!("cargo:rustc-link-lib=stdc++");
             println!("cargo:rustc-link-lib=bcrypt");
         }
         _ => {
             println!("cargo:rustc-link-lib=stdc++");
-            println!("cargo:rustc-link-lib=z");
             println!("cargo:rustc-link-lib=m");
         }
     }
