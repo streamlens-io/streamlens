@@ -23,8 +23,9 @@ pub struct AuSummary {
     pub is_idr: bool,
     /// Random access point: IDR, CRA/BLA (H.265) or recovery point SEI.
     pub is_keyframe: bool,
-    /// H.265 RASL leading picture (undecodable when decode starts at its
-    /// associated CRA). Always false for H.264.
+    /// Leading picture that may reference the GOP before its keyframe
+    /// (undecodable when decode starts at that keyframe): H.265 RASL, or an
+    /// H.264 picture after a recovery point keyframe with a lower POC.
     pub is_rasl: bool,
     pub poc: i32,
     pub temporal_id: u8,

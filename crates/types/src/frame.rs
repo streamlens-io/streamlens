@@ -35,8 +35,9 @@ pub struct FrameRecord {
     /// Random access point (IDR / CRA / BLA, or recovery point).
     pub is_keyframe: bool,
     pub is_idr: bool,
-    /// H.265 RASL leading picture: references the GOP before its CRA, so a
-    /// decode started at the CRA cannot produce it (decoders drop it).
+    /// Leading picture that references the GOP before its keyframe (H.265
+    /// RASL, H.264 open-GOP leading picture), so a decode started at that
+    /// keyframe cannot produce it.
     pub is_rasl: bool,
     /// Presentation timestamp in nanoseconds.
     pub pts: Option<i64>,

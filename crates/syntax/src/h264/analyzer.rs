@@ -20,6 +20,9 @@ pub struct H264Analyzer {
     active_sps: Option<u32>,
     poc_state: PocState,
     dpb: Dpb,
+    /// POC of the last non-IDR (recovery point) keyframe; pictures that
+    /// follow it in decode order with a lower POC are its leading pictures.
+    recovery_poc: Option<i32>,
 }
 
 impl H264Analyzer {
@@ -131,6 +134,17 @@ impl AuAnalyzer for H264Analyzer {
             self.poc_state.mmco5(0);
         }
 
+        // Open GOP: leading pictures of a recovery point may reference the
+        // GOP before it, so (like H.265 RASL) a decode started at the
+        // recovery point cannot produce them.
+        let is_keyframe = is_idr || recovery_point;
+        let is_leading = !is_keyframe && self.recovery_poc.is_some_and(|k| poc < k);
+        if is_keyframe {
+            self.recovery_poc = (!is_idr).then_some(poc);
+        } else if mmco5 {
+            self.recovery_poc = None;
+        }
+
         let frame_type = match sh.slice_type {
             SliceType::I | SliceType::Si => FrameType::I,
             SliceType::P | SliceType::Sp => FrameType::P,
@@ -140,8 +154,8 @@ impl AuAnalyzer for H264Analyzer {
         Some(AuSummary {
             frame_type,
             is_idr,
-            is_keyframe: is_idr || recovery_point,
-            is_rasl: false,
+            is_keyframe,
+            is_rasl: is_leading,
             poc,
             temporal_id: 0,
             slice_qp: sh.slice_qp,

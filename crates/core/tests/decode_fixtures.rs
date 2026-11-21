@@ -204,3 +204,116 @@ fn indexer_cleans_up_with_session_drop() {
     drop(session);
     assert!(!path.exists(), "ES cache not removed on drop");
 }
+
+/// Every frame of `name` decoded by ffmpeg, in display order (yuv420p luma
+/// only).
+fn ffmpeg_luma_frames(name: &str, w: usize, h: usize) -> Vec<Vec<u8>> {
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(fixture(name))
+        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+        .output()
+        .expect("ffmpeg available");
+    assert!(out.status.success(), "ffmpeg failed on {name}");
+    out.stdout
+        .chunks_exact(w * h * 3 / 2)
+        .map(|f| f[..w * h].to_vec())
+        .collect()
+}
+
+/// Seeks to every keyframe with a fresh session, then walks that keyframe's
+/// segment in display order. Every frame at or after the keyframe in
+/// display order must carry exactly the pixels ffmpeg decodes at that
+/// display position — a frame labelled with the wrong decode index fails
+/// here even when its geometry and analysis look plausible.
+fn assert_seek_labels_match_ffmpeg(name: &str) {
+    let probe = Session::open(&fixture(name), |_| {}).unwrap();
+    let (w, h) = (
+        probe.index.info.width as usize,
+        probe.index.info.height as usize,
+    );
+    let reference = ffmpeg_luma_frames(name, w, h);
+    assert_eq!(reference.len(), probe.index.frames.len());
+    let keyframes: Vec<u32> = probe
+        .index
+        .frames
+        .iter()
+        .filter(|f| f.is_keyframe)
+        .map(|f| f.decode_index)
+        .collect();
+    drop(probe);
+
+    for (n, &k) in keyframes.iter().enumerate() {
+        let mut session = Session::open(&fixture(name), |_| {}).unwrap();
+        let index = session.index.clone();
+        let end = keyframes
+            .get(n + 1)
+            .copied()
+            .unwrap_or(index.frames.len() as u32);
+        let start_display = index.frames[k as usize].display_index;
+        let mut targets: Vec<u32> = (k..end)
+            .filter(|&i| index.frames[i as usize].display_index >= start_display)
+            .collect();
+        targets.sort_by_key(|&i| index.frames[i as usize].display_index);
+        for t in targets {
+            let display = index.frames[t as usize].display_index as usize;
+            let f = session
+                .frame(t)
+                .unwrap_or_else(|e| panic!("{name}: seek to keyframe {k}, frame {t}: {e}"));
+            assert!(
+                f.image.planes[0] == reference[display],
+                "{name}: after seeking to keyframe {k}, frame {t} (display {display}) \
+                 does not match ffmpeg's frame at that display position"
+            );
+        }
+    }
+
+    // A direct seek to a leading picture must decode it from the previous
+    // keyframe, not drop or mislabel it.
+    let probe = Session::open(&fixture(name), |_| {}).unwrap();
+    let leading: Vec<u32> = probe
+        .index
+        .frames
+        .iter()
+        .filter(|f| f.is_rasl && !probe.index.is_undecodable_leading(f.decode_index))
+        .map(|f| f.decode_index)
+        .collect();
+    drop(probe);
+    for t in leading {
+        let mut session = Session::open(&fixture(name), |_| {}).unwrap();
+        let display = session.index.frames[t as usize].display_index as usize;
+        let f = session
+            .frame(t)
+            .unwrap_or_else(|e| panic!("{name}: seek to leading frame {t}: {e}"));
+        assert!(
+            f.image.planes[0] == reference[display],
+            "{name}: leading frame {t} (display {display}) does not match ffmpeg"
+        );
+    }
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_h264_closed_gop() {
+    assert_seek_labels_match_ffmpeg("h264_prog.mp4");
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_h264_open_gop() {
+    let index = Session::open(&fixture("h264_opengop.ts"), |_| {})
+        .unwrap()
+        .index
+        .clone();
+    assert!(
+        index
+            .frames
+            .iter()
+            .any(|f| f.is_rasl && !index.is_undecodable_leading(f.decode_index)),
+        "fixture must contain mid-stream open-GOP leading pictures"
+    );
+    assert_seek_labels_match_ffmpeg("h264_opengop.ts");
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_hevc() {
+    assert_seek_labels_match_ffmpeg("hevc_8bit.mp4");
+}
