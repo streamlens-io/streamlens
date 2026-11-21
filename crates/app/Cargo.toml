@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 streamlens-types = { workspace = true }
-streamlens-syntax = { workspace = true }
 streamlens-core = { workspace = true }
 iced = { version = "0.14", features = ["wgpu", "image", "canvas", "tokio", "advanced", "lazy"] }
 rfd = "0.15"

@@ -17,16 +17,17 @@ fn main() {
         .unwrap_or(600);
 
     let mut session = Session::open(std::path::Path::new(&path), |_| {}).expect("open");
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
     let fps = session
-        .index
+        .index()
         .info
         .frame_rate
         .map(|(a, b)| a as f64 / b as f64)
         .unwrap_or(25.0);
     println!(
         "{n} frames, nominal {fps:.2} fps, {}x{}",
-        session.index.info.width, session.index.info.height
+        session.index().info.width,
+        session.index().info.height
     );
 
     let report = |name: &str, s: &streamlens_core::playback::PlayStats| {

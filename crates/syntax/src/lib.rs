@@ -1,7 +1,7 @@
 //! Pure-Rust bitstream syntax layer: NAL parsing, recording bit-reader,
 //! parameter set / slice header parsers, POC + DPB models.
 //!
-//! No GStreamer or decoder dependencies; operates on raw byte slices.
+//! No FFI or decoder dependencies; operates on raw byte slices.
 
 pub mod analyzer;
 pub mod bitread;
@@ -10,7 +10,7 @@ pub mod h264;
 pub mod h265;
 pub mod nal;
 
-pub use analyzer::{AuAnalyzer, AuSummary, NalSummary};
+pub use analyzer::{AuAnalyzer, AuSummary, Insertion, NalSummary};
 
 pub use bitread::{BitReader, FieldNode, FieldSink, FieldTree, FieldValue, NoRecord, Recorder};
 

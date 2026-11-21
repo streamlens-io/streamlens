@@ -1,38 +1,81 @@
-//! Byte-budgeted cache of decoded frames, keyed by decode index.
+//! Decoded frames kept around the playhead, keyed by decode index.
 //!
-//! Eviction is by distance from the pivot (the last explicitly requested
-//! frame — the playhead), not LRU. Recency is the wrong signal here: during
-//! playback the just-played frame is the most recently touched while the
-//! prefetched frames ahead of the playhead are the oldest, so LRU evicts
-//! exactly the frames that are about to be displayed and every GOP gets
-//! re-decoded (short-GOP 4K collapsed to ~13 fps this way).
+//! The cache holds a window of decode indices around the pivot (the last
+//! explicitly requested frame — the playhead): `behind` frames before it and
+//! `ahead` after it. Everything outside is dropped. Recency is the wrong
+//! signal here: during playback the just-played frame is the most recently
+//! touched while the prefetched frames ahead of the playhead are the oldest,
+//! so LRU evicts exactly the frames that are about to be displayed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::decode::DecodedFrame;
+use crate::decode::{DecodedFrame, REORDER_AHEAD};
+
+/// How many decoded frames stay in memory around the playhead, in decode
+/// order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheWindow {
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+impl CacheWindow {
+    /// The decoder emits frames up to [`REORDER_AHEAD`] past the requested
+    /// one; a smaller window would drop frames it just decoded. Playback
+    /// warms ahead within the margin above that.
+    pub const MIN_AHEAD: u32 = REORDER_AHEAD + 16;
+    pub const MAX: u32 = 1024;
+
+    pub fn new(ahead: u32, behind: u32) -> Self {
+        Self {
+            ahead: ahead.clamp(Self::MIN_AHEAD, Self::MAX),
+            behind: behind.min(Self::MAX),
+        }
+    }
+
+    fn contains(&self, pivot: u32, k: u32) -> bool {
+        k <= pivot.saturating_add(self.ahead) && k.saturating_add(self.behind) >= pivot
+    }
+}
+
+impl Default for CacheWindow {
+    fn default() -> Self {
+        Self::new(128, 64)
+    }
+}
 
 pub struct FrameCache {
     frames: HashMap<u32, Arc<DecodedFrame>>,
     /// Decode index of the last explicitly requested frame.
     pivot: u32,
-    budget_bytes: usize,
-    used_bytes: usize,
+    window: CacheWindow,
 }
 
 impl FrameCache {
-    pub fn new(budget_bytes: usize) -> Self {
+    pub fn new(window: CacheWindow) -> Self {
         Self {
             frames: HashMap::new(),
             pivot: 0,
-            budget_bytes,
-            used_bytes: 0,
+            window,
         }
     }
 
-    /// Marks the user-facing position; eviction keeps frames near it.
+    /// Marks the user-facing position. Frames now outside the window are
+    /// dropped at the next insert: this runs on the frame-delivery path,
+    /// where freeing a 4K frame measurably delays emission (p99 +3 ms at
+    /// 4K30), while inserts happen in the decode-ahead gaps.
     pub fn set_pivot(&mut self, decode_index: u32) {
         self.pivot = decode_index;
+    }
+
+    pub fn window(&self) -> CacheWindow {
+        self.window
+    }
+
+    pub fn set_window(&mut self, window: CacheWindow) {
+        self.window = window;
+        self.evict();
     }
 
     pub fn get(&self, decode_index: u32) -> Option<Arc<DecodedFrame>> {
@@ -43,93 +86,32 @@ impl FrameCache {
         self.frames.contains_key(&decode_index)
     }
 
-    pub fn budget_bytes(&self) -> usize {
-        self.budget_bytes
-    }
-
-    /// Observed mean bytes per resident frame, once there are enough
-    /// frames for the average to mean something.
-    pub fn observed_frame_bytes(&self) -> Option<usize> {
-        (self.frames.len() >= 8).then(|| self.used_bytes / self.frames.len())
-    }
-
     pub fn clear(&mut self) {
         self.frames.clear();
-        self.used_bytes = 0;
     }
 
+    /// Stores a frame if it lies inside the window, and drops the frames
+    /// that fell out of it.
     pub fn insert(&mut self, frame: DecodedFrame) {
         let key = frame.decode_index;
-        let size = frame_bytes(&frame);
-        if let Some(old) = self.frames.insert(key, Arc::new(frame)) {
-            self.used_bytes -= frame_bytes(&old);
+        if self.window.contains(self.pivot, key) {
+            self.frames.insert(key, Arc::new(frame));
         }
-        self.used_bytes += size;
         self.evict();
     }
 
-    /// Evicts the frame farthest from the pivot until within budget.
-    /// Frames behind the pivot weigh 4x their distance: they were already
-    /// shown, while frames ahead are about to be — a prefetched frame only
-    /// loses to a played one when it sits more than 4x farther out.
     fn evict(&mut self) {
-        while self.used_bytes > self.budget_bytes && self.frames.len() > 1 {
-            let pivot = self.pivot;
-            let weight = |k: u32| {
-                let d = k.abs_diff(pivot) as u64;
-                if k < pivot {
-                    (d * 4, k)
-                } else {
-                    (d, k)
-                }
-            };
-            let Some(&victim) = self
-                .frames
-                .keys()
-                .filter(|&&k| k != pivot)
-                .max_by_key(|&&k| weight(k))
-            else {
-                return;
-            };
-            if let Some(f) = self.frames.remove(&victim) {
-                self.used_bytes -= frame_bytes(&f);
-            }
-        }
+        let (pivot, window) = (self.pivot, self.window);
+        self.frames.retain(|&k, _| window.contains(pivot, k));
     }
-}
-
-fn frame_bytes(f: &DecodedFrame) -> usize {
-    use std::mem::size_of;
-    use streamlens_types::{CodingUnit, PredictionUnit, SuperBlock, TransformUnit};
-
-    let image: usize = f.image.planes.iter().map(Vec::len).sum();
-    let analysis = f.analysis.as_ref().map_or(0, |a| {
-        let planar = |p: &Option<streamlens_types::PlanarImage>| {
-            p.as_ref()
-                .map_or(0, |i| i.planes.iter().map(Vec::len).sum())
-        };
-        let signed = |p: &Option<streamlens_types::SignedImage>| {
-            p.as_ref()
-                .map_or(0, |i| i.planes.iter().map(|v| v.len() * 2).sum())
-        };
-        a.superblocks.len() * size_of::<SuperBlock>()
-            + a.cus.len() * size_of::<CodingUnit>()
-            + a.pus.len() * size_of::<PredictionUnit>()
-            + a.tus.len() * size_of::<TransformUnit>()
-            + planar(&a.stages.predicted)
-            + planar(&a.stages.unfiltered)
-            + signed(&a.stages.residual)
-            + signed(&a.stages.coefficients)
-    });
-    image + analysis
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamlens_types::{PlanarImage, Subsampling};
+    use streamlens_types::{Codec, FrameAnalysis, PlanarImage, StagePlanes, Subsampling};
 
-    fn frame(idx: u32, bytes: usize) -> DecodedFrame {
+    fn frame(idx: u32) -> DecodedFrame {
         DecodedFrame {
             decode_index: idx,
             image: PlanarImage {
@@ -137,35 +119,51 @@ mod tests {
                 height: 0,
                 bit_depth: 8,
                 subsampling: Subsampling::Cs420,
-                planes: vec![vec![0; bytes]],
+                planes: Vec::new(),
             },
-            analysis: None,
+            analysis: Arc::new(FrameAnalysis {
+                codec: Codec::H264,
+                width: 0,
+                height: 0,
+                superblock_size: 16,
+                poc: 0,
+                superblocks: Vec::new(),
+                cus: Vec::new(),
+                pus: Vec::new(),
+                tus: Vec::new(),
+                stages: StagePlanes::default(),
+            }),
         }
     }
 
     #[test]
-    fn evicts_farthest_from_pivot() {
-        let mut cache = FrameCache::new(250);
+    fn keeps_only_the_window_around_the_pivot() {
+        let window = CacheWindow::new(64, 2);
+        let mut cache = FrameCache::new(window);
         cache.set_pivot(10);
-        cache.insert(frame(0, 100)); // farthest behind
-        cache.insert(frame(10, 100));
-        cache.insert(frame(11, 100)); // over budget: evicts 0, keeps 10/11
-        assert!(!cache.contains(0));
-        assert!(cache.contains(10));
-        assert!(cache.contains(11));
+        for i in 0..100 {
+            cache.insert(frame(i));
+        }
+        let kept: Vec<u32> = (0..100).filter(|&i| cache.contains(i)).collect();
+        assert_eq!(kept, (8..=74).collect::<Vec<_>>());
     }
 
     #[test]
-    fn playback_pattern_keeps_upcoming_frames() {
-        // Play forward with a 3-frame budget and prefetch: the frames just
-        // ahead of the pivot must survive, the played ones must go.
-        let mut cache = FrameCache::new(300);
-        for i in 0..10u32 {
-            cache.set_pivot(i);
-            cache.insert(frame(i + 2, 100)); // prefetch ahead
-            if i >= 2 {
-                assert!(cache.contains(i), "due frame {i} was evicted");
-            }
+    fn moving_the_pivot_drops_frames_left_behind() {
+        let mut cache = FrameCache::new(CacheWindow::new(64, 1));
+        cache.set_pivot(0);
+        for i in 0..10 {
+            cache.insert(frame(i));
         }
+        cache.set_pivot(5);
+        cache.insert(frame(10));
+        assert!(!cache.contains(3));
+        assert!(cache.contains(4) && cache.contains(10));
+    }
+
+    #[test]
+    fn window_is_clamped() {
+        assert_eq!(CacheWindow::new(1, 5000).ahead, CacheWindow::MIN_AHEAD);
+        assert_eq!(CacheWindow::new(1, 5000).behind, CacheWindow::MAX);
     }
 }

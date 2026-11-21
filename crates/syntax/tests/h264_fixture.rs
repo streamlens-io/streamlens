@@ -12,8 +12,8 @@ fn fixture() -> Vec<u8> {
     std::fs::read(path).expect("fixture missing — run fixtures/generate.sh")
 }
 
-/// Minimal Annex B access-unit splitter for tests (production uses
-/// h264parse's AU alignment). A new AU starts at any non-VCL NAL following a
+/// Minimal Annex B access-unit splitter for tests (production gets
+/// AU-aligned packets from libavformat). A new AU starts at any non-VCL NAL following a
 /// VCL NAL, or at a VCL NAL with first_mb_in_slice == 0.
 fn split_aus(data: &[u8]) -> Vec<&[u8]> {
     let mut aus = Vec::new();
@@ -131,4 +131,49 @@ fn nal_inventory_is_complete() {
             assert!(w[0].offset < w[1].offset);
         }
     }
+}
+
+#[test]
+fn parameter_sets_are_inserted_into_keyframes_that_lack_them() {
+    let data = fixture();
+    let mut analyzer = H264Analyzer::new();
+    let mut diags = Diagnostics::default();
+    let mut inserted = 0;
+    for (i, au) in split_aus(&data).into_iter().enumerate() {
+        // Drop in-band SPS/PPS from every AU but the first.
+        let mut stripped = Vec::new();
+        for nal in iter_nals(au) {
+            let t = nal.bytes[0] & 0x1F;
+            if i > 0 && (t == 7 || t == 8) {
+                continue;
+            }
+            stripped.extend_from_slice(&[0, 0, 1]);
+            stripped.extend_from_slice(nal.bytes);
+        }
+        let Some(mut summary) = analyzer.analyze(i as u32, &stripped, &mut diags) else {
+            continue;
+        };
+        let Some(insertion) = analyzer.parameter_sets_to_insert(&stripped, &mut summary) else {
+            assert!(
+                i == 0 || !summary.is_keyframe,
+                "keyframe {i} without SPS/PPS left unchanged"
+            );
+            continue;
+        };
+        assert!(summary.is_keyframe);
+        inserted += 1;
+        let rewritten = insertion.apply(&stripped);
+        // The summary describes the rewritten AU exactly.
+        let actual: Vec<(usize, u8)> = iter_nals(&rewritten)
+            .map(|n| (n.start_code_offset, n.bytes[0] & 0x1F))
+            .collect();
+        let claimed: Vec<(usize, u8)> = summary
+            .nals
+            .iter()
+            .map(|n| (n.offset, n.raw_type))
+            .collect();
+        assert_eq!(claimed, actual, "AU {i}");
+        assert_eq!(&actual[..2], &[(0, 7), (actual[1].0, 8)], "AU {i}");
+    }
+    assert_eq!(inserted, 2, "two mid-stream IDRs");
 }

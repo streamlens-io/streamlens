@@ -11,7 +11,7 @@
 set -euo pipefail
 
 FFMPEG_REPO=https://github.com/FFmpeg/FFmpeg.git
-FFMPEG_COMMIT=8d65da767b2b727a80672969f3120286ee478290
+FFMPEG_COMMIT=1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7 # n8.1.3
 LIBDE265_REPO=https://github.com/strukturag/libde265.git
 LIBDE265_COMMIT=4dd701fffac01632ffd5cabc5ef10deb56accba1
 
@@ -48,13 +48,19 @@ build_ffmpeg() {
   fetch "$FFMPEG_REPO" "$FFMPEG_COMMIT" "$dir"
   git -C "$dir" -c user.name=vendor -c user.email=vendor@localhost \
     am "$VENDOR"/patches/ffmpeg/*.patch
+  rm -rf "$prefix" # no stale libraries from an earlier configure
+  # libavformat demuxes every container the app opens; the analysis H.264
+  # decoder lives in libavcodec.
   (cd "$dir" && ./configure \
     --prefix="$prefix" \
     --disable-everything --disable-programs --disable-doc \
     --disable-network --disable-autodetect \
-    --enable-decoder=h264 --enable-parser=h264 \
-    --enable-demuxer=h264 --enable-demuxer=mov \
+    --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
+    --enable-decoder=h264 \
+    --enable-parser=h264 --enable-parser=hevc \
+    --enable-demuxer=h264 --enable-demuxer=hevc --enable-demuxer=mov \
     --enable-demuxer=matroska --enable-demuxer=mpegts \
+    --enable-demuxer=avi --enable-demuxer=flv \
     --enable-protocol=file \
     --enable-static --disable-shared)
   make -C "$dir" -j"$JOBS"
@@ -67,6 +73,7 @@ build_libde265() {
   fetch "$LIBDE265_REPO" "$LIBDE265_COMMIT" "$dir"
   git -C "$dir" -c user.name=vendor -c user.email=vendor@localhost \
     am "$VENDOR"/patches/libde265/*.patch
+  rm -rf "$prefix" "$dir/build"
   cmake -S "$dir" -B "$dir/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" \

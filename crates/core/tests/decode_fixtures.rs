@@ -10,7 +10,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
 #[test]
 fn decodes_frames_via_session() {
     let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
-    assert_eq!(session.index.frames.len(), 75);
+    assert_eq!(session.index().frames.len(), 75);
 
     // A mid-GOP frame: exercises decode-from-keyframe.
     let f10 = session.frame(10).unwrap();
@@ -74,7 +74,7 @@ fn decoded_pixels_match_ffmpeg_reference() {
 fn analysis_meta_flows_through_session_h264() {
     let mut session = Session::open(&fixture("h264_prog.264"), |_| {}).unwrap();
     let f0 = session.frame(0).unwrap();
-    let a = f0.analysis.as_deref().expect("slh264dec attaches analysis");
+    let a = &*f0.analysis;
     assert_eq!(a.superblock_size, 16);
     assert_eq!(a.superblocks.len(), 20 * 15);
     assert!(a
@@ -85,7 +85,7 @@ fn analysis_meta_flows_through_session_h264() {
 
     // Inter frame has MVs.
     let f3 = session.frame(3).unwrap();
-    let a3 = f3.analysis.as_deref().unwrap();
+    let a3 = &*f3.analysis;
     let mvs = a3
         .pus
         .iter()
@@ -119,7 +119,7 @@ fn backward_seek_before_pipeline_start_rebuilds() {
     // it could never emit (playback froze, seeking back hung).
     let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
     let k = session
-        .index
+        .index()
         .frames
         .iter()
         .filter(|f| f.is_keyframe)
@@ -147,7 +147,7 @@ fn hevc_open_gop_seek_handles_rasl() {
     // desync froze playback mid-file), and a RASL target must decode from
     // one keyframe earlier so its references exist.
     let mut session = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
-    let index = session.index.clone();
+    let index = session.index();
     let Some(r) = index
         .frames
         .iter()
@@ -174,14 +174,14 @@ fn hevc_open_gop_seek_handles_rasl() {
 #[test]
 fn hevc_end_to_end() {
     let mut session = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
-    assert_eq!(session.index.codec, streamlens_types::Codec::H265);
-    assert_eq!(session.index.frames.len(), 75);
-    assert_eq!(session.index.info.width, 320);
-    assert_eq!(session.index.info.height, 240);
+    assert_eq!(session.index().codec, streamlens_types::Codec::H265);
+    assert_eq!(session.index().frames.len(), 75);
+    assert_eq!(session.index().info.width, 320);
+    assert_eq!(session.index().info.height, 240);
 
     let f0 = session.frame(0).unwrap();
     assert_eq!(f0.image.width, 320);
-    let a = f0.analysis.as_deref().expect("slh265dec attaches analysis");
+    let a = &*f0.analysis;
     assert!(a.superblock_size >= 16);
     // CU rects tile the picture.
     let area: u64 = a
@@ -196,11 +196,175 @@ fn hevc_end_to_end() {
     assert_eq!(f7.decode_index, 7);
 }
 
+/// Every frame of `path` decoded by ffmpeg, in display order (luma only,
+/// 8-bit or 10-bit little endian like the decoded planes).
+fn ffmpeg_luma_frames(path: &std::path::Path, w: usize, h: usize, bit_depth: u8) -> Vec<Vec<u8>> {
+    let (pix_fmt, bps) = if bit_depth > 8 {
+        ("yuv420p10le", 2)
+    } else {
+        ("yuv420p", 1)
+    };
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"])
+        .output()
+        .expect("ffmpeg available");
+    assert!(out.status.success(), "ffmpeg failed on {}", path.display());
+    out.stdout
+        .chunks_exact(w * h * 3 / 2 * bps)
+        .map(|f| f[..w * h * bps].to_vec())
+        .collect()
+}
+
+/// Seeks to every keyframe with a fresh session, then walks that keyframe's
+/// segment in display order. Every frame at or after the keyframe in
+/// display order must carry exactly the pixels ffmpeg decodes at that
+/// display position — a frame labelled with the wrong decode index fails
+/// here even when its geometry and analysis look plausible.
+fn assert_seek_labels_match_ffmpeg(name: &str) {
+    assert_seek_labels_match_ffmpeg_at(&fixture(name));
+}
+
+fn assert_seek_labels_match_ffmpeg_at(path: &std::path::Path) {
+    let name = path.display();
+    let probe = Session::open(path, |_| {}).unwrap();
+    let (w, h) = (
+        probe.index().info.width as usize,
+        probe.index().info.height as usize,
+    );
+    let reference = ffmpeg_luma_frames(path, w, h, probe.index().info.bit_depth);
+    assert_eq!(reference.len(), probe.index().frames.len());
+    let keyframes: Vec<u32> = probe
+        .index()
+        .frames
+        .iter()
+        .filter(|f| f.is_keyframe)
+        .map(|f| f.decode_index)
+        .collect();
+    drop(probe);
+
+    for (n, &k) in keyframes.iter().enumerate() {
+        let mut session = Session::open(path, |_| {}).unwrap();
+        let index = session.index();
+        let end = keyframes
+            .get(n + 1)
+            .copied()
+            .unwrap_or(index.frames.len() as u32);
+        let start_display = index.frames[k as usize].display_index;
+        let mut targets: Vec<u32> = (k..end)
+            .filter(|&i| index.frames[i as usize].display_index >= start_display)
+            .collect();
+        targets.sort_by_key(|&i| index.frames[i as usize].display_index);
+        for t in targets {
+            let display = index.frames[t as usize].display_index as usize;
+            let f = session
+                .frame(t)
+                .unwrap_or_else(|e| panic!("{name}: seek to keyframe {k}, frame {t}: {e}"));
+            assert!(
+                f.image.planes[0] == reference[display],
+                "{name}: after seeking to keyframe {k}, frame {t} (display {display}) \
+                 does not match ffmpeg's frame at that display position"
+            );
+        }
+    }
+
+    // A direct seek to a leading picture must decode it from the previous
+    // keyframe, not drop or mislabel it.
+    let probe = Session::open(path, |_| {}).unwrap();
+    let leading: Vec<u32> = probe
+        .index()
+        .frames
+        .iter()
+        .filter(|f| f.is_rasl && !probe.index().is_undecodable_leading(f.decode_index))
+        .map(|f| f.decode_index)
+        .collect();
+    drop(probe);
+    for t in leading {
+        let mut session = Session::open(path, |_| {}).unwrap();
+        let display = session.index().frames[t as usize].display_index as usize;
+        let f = session
+            .frame(t)
+            .unwrap_or_else(|e| panic!("{name}: seek to leading frame {t}: {e}"));
+        assert!(
+            f.image.planes[0] == reference[display],
+            "{name}: leading frame {t} (display {display}) does not match ffmpeg"
+        );
+    }
+}
+
 #[test]
-fn indexer_cleans_up_with_session_drop() {
-    let session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
-    let path = session.index.es_cache_path.clone();
-    assert!(path.exists());
+fn seek_labels_match_ffmpeg_h264_closed_gop() {
+    assert_seek_labels_match_ffmpeg("h264_prog.mp4");
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_h264_open_gop() {
+    let index = Session::open(&fixture("h264_opengop.ts"), |_| {})
+        .unwrap()
+        .index()
+        .clone();
+    assert!(
+        index
+            .frames
+            .iter()
+            .any(|f| f.is_rasl && !index.is_undecodable_leading(f.decode_index)),
+        "fixture must contain mid-stream open-GOP leading pictures"
+    );
+    assert_seek_labels_match_ffmpeg("h264_opengop.ts");
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_hevc() {
+    assert_seek_labels_match_ffmpeg("hevc_8bit.mp4");
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_every_container() {
+    // Seeking reads the frames back from the file: by byte position for
+    // raw ES, by timestamp for MP4/MKV/TS.
+    for name in [
+        "h264_prog.264",
+        "h264.ts",
+        "h264_interlaced.264",
+        "hevc_8bit.265",
+        "hevc_10bit.mkv",
+    ] {
+        assert_seek_labels_match_ffmpeg(name);
+    }
+}
+
+#[test]
+fn seek_into_raw_es_with_parameter_sets_only_at_start() {
+    // Raw Annex B where SPS/PPS precede only the first IDR: a decode that
+    // starts at a later keyframe needs the indexer to re-insert them.
+    let data = std::fs::read(fixture("h264_prog.264")).unwrap();
+    let mut out = Vec::new();
+    let mut seen_slice = false;
+    for nal in streamlens_syntax::nal::iter_nals(&data) {
+        let t = nal.bytes[0] & 0x1F;
+        seen_slice |= t == 1 || t == 5;
+        if seen_slice && (t == 7 || t == 8) {
+            continue;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal.bytes);
+    }
+    let path = std::env::temp_dir().join(format!(
+        "streamlens-headers-once-{}.264",
+        std::process::id()
+    ));
+    std::fs::write(&path, &out).unwrap();
+
+    let session = Session::open(&path, |_| {}).unwrap();
+    let keyframes = session
+        .index()
+        .frames
+        .iter()
+        .filter(|f| f.is_keyframe)
+        .count();
+    assert!(keyframes > 1, "fixture needs mid-stream keyframes");
     drop(session);
-    assert!(!path.exists(), "ES cache not removed on drop");
+    assert_seek_labels_match_ffmpeg_at(&path);
+    std::fs::remove_file(&path).ok();
 }

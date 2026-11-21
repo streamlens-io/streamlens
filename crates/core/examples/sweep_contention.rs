@@ -17,9 +17,9 @@ fn main() {
     let path = std::path::PathBuf::from(path);
 
     let mut session = Session::open(&path, |_| {}).expect("open");
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
 
-    let sweep = Sweep::spawn(path, None, |_, _| {});
+    let sweep = Sweep::spawn(session.share(), None, |_, _, _| {});
     let s = measure_playback(&mut session, 0, false, frames.min(n)).expect("play");
     println!(
         "sweep running  {:>4} frames  {:>6.2} fps  mean {:>6.2?}  p99 {:>7.2?}  max {:>7.2?}  late {}",

@@ -10,8 +10,6 @@ use crate::decode::DecodedFrame;
 use crate::session::Session;
 use crate::Error;
 
-/// How many frames past the playhead the engine keeps warm.
-const AHEAD: u32 = 64;
 /// Time budget for the initial pre-buffer before emission starts.
 const PREBUFFER_BUDGET: Duration = Duration::from_millis(800);
 
@@ -29,7 +27,7 @@ impl Playback {
     /// `fast` ignores pacing (decode-bound playback).
     pub fn new(session: &Session, from_display: u32, fast: bool) -> Self {
         let fps = session
-            .index
+            .index()
             .info
             .frame_rate
             .map(|(n, d)| n as f64 / d as f64)
@@ -72,12 +70,13 @@ impl Playback {
     /// its command queue between steps.
     pub fn step(&mut self, session: &mut Session) -> Result<Option<Arc<DecodedFrame>>, Error> {
         loop {
-            let Some(decode_index) = session.index.decode_for_display(self.next_display) else {
+            let index = session.index();
+            let Some(decode_index) = index.decode_for_display(self.next_display) else {
                 return Ok(None);
             };
             // Undecodable leading pictures (RASL at stream start) are
             // dropped by every decoder; skip them instead of ending play.
-            if session.index.is_undecodable_leading(decode_index) {
+            if index.is_undecodable_leading(decode_index) {
                 self.next_display += 1;
                 self.warmed = self.warmed.max(self.next_display);
                 continue;
@@ -134,20 +133,16 @@ impl Playback {
     /// without skipping, one cached frame would stall warm-ahead forever)
     /// and undecodable leading pictures (nothing can ever produce them).
     fn next_warm_target(&mut self, session: &Session) -> Option<u32> {
-        // Warm-ahead must stay well under the cache capacity: warming past
-        // it evicts the frames just ahead of the playhead (they are the
-        // LRU-oldest) and every GOP gets decoded again and again.
+        // Warm only as far as the decoder's emissions still land inside
+        // the cache window (they run up to REORDER_AHEAD past the target);
+        // warming past it drops frames as soon as they are decoded.
         let headroom = crate::decode::REORDER_AHEAD + 16;
-        let ahead = AHEAD.min(
-            (session.cache_capacity_frames() as u32)
-                .saturating_sub(headroom)
-                .max(4),
-        );
-        let limit = (self.next_display + ahead).min(session.index.frames.len() as u32);
+        let ahead = session.window().ahead.saturating_sub(headroom).max(4);
+        let index = session.index();
+        let limit = (self.next_display + ahead).min(index.frames.len() as u32);
         while self.warmed < limit {
-            let decode_index = session.index.decode_for_display(self.warmed)?;
-            if session.is_cached(decode_index) || session.index.is_undecodable_leading(decode_index)
-            {
+            let decode_index = index.decode_for_display(self.warmed)?;
+            if session.is_cached(decode_index) || index.is_undecodable_leading(decode_index) {
                 self.warmed += 1;
             } else {
                 return Some(decode_index);

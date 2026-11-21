@@ -1,5 +1,7 @@
 //! Codec-agnostic access-unit analysis driven by the indexer.
 
+use std::collections::BTreeMap;
+
 use streamlens_types::FrameType;
 
 use crate::diag::Diagnostics;
@@ -14,6 +16,9 @@ pub struct NalSummary {
     pub raw_type: u8,
     pub name: &'static str,
     pub is_vcl: bool,
+    /// Not in the analyzed file: a parameter set inserted in front of a
+    /// keyframe so a decode can start there.
+    pub inserted: bool,
 }
 
 /// Everything the syntax layer learns about one access unit.
@@ -23,8 +28,9 @@ pub struct AuSummary {
     pub is_idr: bool,
     /// Random access point: IDR, CRA/BLA (H.265) or recovery point SEI.
     pub is_keyframe: bool,
-    /// H.265 RASL leading picture (undecodable when decode starts at its
-    /// associated CRA). Always false for H.264.
+    /// Leading picture that may reference the GOP before its keyframe
+    /// (undecodable when decode starts at that keyframe): H.265 RASL, or an
+    /// H.264 picture after a recovery point keyframe with a lower POC.
     pub is_rasl: bool,
     pub poc: i32,
     pub temporal_id: u8,
@@ -56,6 +62,13 @@ pub trait AuAnalyzer: Send {
     fn stream_props(&self) -> Option<StreamProps> {
         None
     }
+
+    /// Makes a keyframe AU decodable on its own: when it lacks in-band
+    /// parameter sets, returns every parameter set seen so far and where to
+    /// insert them (after a leading access unit delimiter), and updates
+    /// `summary.nals` to the AU as it reads with them inserted. `None` when
+    /// the AU needs no change.
+    fn parameter_sets_to_insert(&self, au: &[u8], summary: &mut AuSummary) -> Option<Insertion>;
 
     /// Re-parses one AU with field recording for the Headers panel, using
     /// the current parameter-set state. Bit offsets in the trees are
@@ -90,4 +103,92 @@ pub struct StreamProps {
     pub bit_depth: u8,
     pub chroma_format: String,
     pub frame_rate: Option<(u32, u32)>,
+}
+
+/// Raw parameter-set NALs seen so far, for re-insertion before keyframes.
+/// Keyed by (NAL type, id): ascending NAL type is also the required order
+/// (H.264 SPS 7 < PPS 8; H.265 VPS 32 < SPS 33 < PPS 34).
+#[derive(Default)]
+pub(crate) struct ParameterSetStore {
+    nals: BTreeMap<(u8, u32), Vec<u8>>,
+}
+
+impl ParameterSetStore {
+    pub fn insert(&mut self, raw_type: u8, id: u32, nal: &[u8]) {
+        self.nals.insert((raw_type, id), nal.to_vec());
+    }
+
+    /// See [`AuAnalyzer::parameter_sets_to_insert`]. `required` lists the
+    /// parameter-set NAL types a standalone keyframe needs; `describe`
+    /// gives the name and VCL flag of a NAL type.
+    pub fn splice(
+        &self,
+        au: &[u8],
+        summary: &mut AuSummary,
+        required: &[u8],
+        aud_type: u8,
+        describe: impl Fn(u8) -> (&'static str, bool),
+    ) -> Option<Insertion> {
+        if !summary.is_keyframe
+            || self.nals.is_empty()
+            || required
+                .iter()
+                .all(|t| summary.nals.iter().any(|n| n.raw_type == *t))
+        {
+            return None;
+        }
+        let at = summary
+            .nals
+            .first()
+            .filter(|n| n.raw_type == aud_type)
+            .map_or(0, |n| n.offset + n.size)
+            .min(au.len());
+
+        let mut block = Vec::new();
+        let mut inserted = Vec::with_capacity(self.nals.len());
+        for (&(raw_type, _), nal) in &self.nals {
+            let (name, is_vcl) = describe(raw_type);
+            inserted.push(NalSummary {
+                offset: at + block.len(),
+                size: 4 + nal.len(),
+                raw_type,
+                name,
+                is_vcl,
+                inserted: true,
+            });
+            block.extend_from_slice(&[0, 0, 0, 1]);
+            block.extend_from_slice(nal);
+        }
+
+        let split = summary.nals.partition_point(|n| n.offset < at);
+        for n in &mut summary.nals[split..] {
+            n.offset += block.len();
+        }
+        summary.nals.splice(split..split, inserted);
+        Some(Insertion { at, bytes: block })
+    }
+}
+
+/// Bytes to insert into an access unit at byte offset `at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Insertion {
+    pub at: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl Insertion {
+    /// `au` with the bytes inserted.
+    pub fn apply(&self, au: &[u8]) -> Vec<u8> {
+        splice_at(au, self.at, &self.bytes)
+    }
+}
+
+/// `au` with `bytes` inserted at `at` (clamped to the AU length).
+pub fn splice_at(au: &[u8], at: usize, bytes: &[u8]) -> Vec<u8> {
+    let at = at.min(au.len());
+    let mut out = Vec::with_capacity(au.len() + bytes.len());
+    out.extend_from_slice(&au[..at]);
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(&au[at..]);
+    out
 }

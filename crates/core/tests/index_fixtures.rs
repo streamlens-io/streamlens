@@ -8,13 +8,11 @@ fn fixture(name: &str) -> std::path::PathBuf {
 }
 
 fn index(name: &str) -> streamlens_core::StreamIndex {
-    streamlens_core::init().unwrap();
     let mut called = false;
-    let (idx, _analyzer) = Indexer::default()
+    let (idx, _analyzer) = Indexer
         .index(&fixture(name), |_| called = true)
         .unwrap_or_else(|e| panic!("indexing {name}: {e}"));
     assert!(called, "progress callback never fired");
-    std::fs::remove_file(&idx.es_cache_path).ok();
     idx
 }
 
@@ -29,20 +27,16 @@ fn assert_h264_fixture_shape(idx: &streamlens_core::StreamIndex, container: &str
     let f0 = &idx.frames[0];
     assert_eq!(f0.frame_type, FrameType::I);
     assert!(f0.is_idr && f0.is_keyframe);
-    assert_eq!(f0.byte_offset, 0);
     assert!(idx.frames.iter().any(|f| f.frame_type == FrameType::B));
 
-    // ES offsets are contiguous and sizes sum to the cache size.
-    let mut expect = None;
-    for f in &idx.frames {
-        if let Some(e) = expect {
-            // Parameter-set-only stretches may sit between AUs, so offsets
-            // are monotonically non-decreasing, never overlapping.
-            assert!(f.byte_offset >= e, "overlapping AU at {}", f.decode_index);
-        }
-        expect = Some(f.byte_offset + f.size_bytes as u64);
-    }
-    assert_eq!(expect.unwrap(), idx.es_size);
+    // Every frame has its own packet in the file.
+    let offsets: std::collections::HashSet<u64> =
+        idx.frames.iter().map(|f| f.file_offset).collect();
+    assert_eq!(offsets.len(), idx.frames.len());
+    assert_eq!(
+        idx.video_bytes,
+        idx.frames.iter().map(|f| f.size_bytes as u64).sum::<u64>()
+    );
 
     // Display order is a permutation and differs from decode order (B-frames).
     let mut disp: Vec<u32> = idx.frames.iter().map(|f| f.display_index).collect();
@@ -86,4 +80,64 @@ fn indexes_h264_raw_es() {
     let idx = index("h264_prog.264");
     assert_h264_fixture_shape(&idx, "raw ES");
     assert_eq!(idx.frames[0].slice_count, 2, "x264 -slices 2");
+}
+
+/// Frame sizes and offsets describe the analyzed file: for containers they
+/// must equal the packet sizes and positions ffprobe reports, whatever is
+/// added for decoding (parameter sets in front of keyframes, start codes for
+/// length-prefixed samples).
+#[test]
+fn frame_sizes_and_offsets_match_ffprobe() {
+    for name in [
+        "h264_prog.mp4",
+        "h264.ts",
+        "h264_opengop.ts",
+        "hevc_8bit.mp4",
+        "hevc_10bit.mkv",
+    ] {
+        let out = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args(["-show_entries", "packet=size,pos", "-of", "csv=p=0"])
+            .arg(fixture(name))
+            .output()
+            .expect("ffprobe available");
+        assert!(out.status.success(), "ffprobe failed on {name}");
+        let expected: Vec<(u32, u64)> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                // MPEG-TS rows carry a trailing (side data) field.
+                let mut fields = l.split(',');
+                let size = fields.next().unwrap().parse().unwrap();
+                let pos = fields.next().unwrap().parse().unwrap();
+                (size, pos)
+            })
+            .collect();
+        let idx = Indexer.index(&fixture(name), |_| {}).unwrap().0;
+        let actual: Vec<(u32, u64)> = idx
+            .frames
+            .iter()
+            .map(|f| (f.size_bytes, f.file_offset))
+            .collect();
+        assert_eq!(actual, expected, "{name}");
+    }
+}
+
+/// In raw Annex B the frame boundaries come from the parser, and FFmpeg
+/// versions place a 4-byte start code's leading zero on different sides
+/// (ffprobe 6.1 vs 8.1), so ffprobe is no stable reference there. Exact
+/// either way: the frames tile the whole file, in order, without gaps.
+#[test]
+fn raw_es_frames_tile_the_file() {
+    for name in ["h264_prog.264", "h264_interlaced.264", "hevc_8bit.265"] {
+        let file_size = std::fs::metadata(fixture(name)).unwrap().len();
+        let idx = Indexer.index(&fixture(name), |_| {}).unwrap().0;
+        let mut expect = 0u64;
+        for f in idx.frames.iter() {
+            assert_eq!(f.file_offset, expect, "{name}: frame {}", f.decode_index);
+            expect += f.size_bytes as u64;
+        }
+        assert_eq!(expect, file_size, "{name}");
+    }
 }

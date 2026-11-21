@@ -16,7 +16,7 @@ fn main() {
     let t = Instant::now();
     let mut session =
         streamlens_core::Session::open(std::path::Path::new(&path), |_| {}).expect("open");
-    let n = session.index.frames.len() as u32;
+    let n = session.index().frames.len() as u32;
     println!("indexed {n} frames in {:?}", t.elapsed());
 
     let mut worst = std::time::Duration::ZERO;

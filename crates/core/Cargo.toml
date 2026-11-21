@@ -7,17 +7,11 @@ license.workspace = true
 [dependencies]
 streamlens-types = { workspace = true }
 streamlens-syntax = { workspace = true }
-streamlens-gst = { workspace = true }
-gstreamer = { workspace = true }
-gstreamer-app = { workspace = true }
-gstreamer-video = { workspace = true }
-gstreamer-pbutils = { workspace = true }
+streamlens-media = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }

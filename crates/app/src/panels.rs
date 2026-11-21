@@ -7,8 +7,7 @@ use std::sync::Arc;
 use iced::widget::{button, column, container, row, scrollable, text, Column};
 use iced::{Element, Fill};
 use streamlens_core::StreamIndex;
-use streamlens_syntax::analyzer::RecordedNal;
-use streamlens_syntax::FieldNode;
+use streamlens_core::{FieldNode, RecordedNal};
 use streamlens_types::{FrameAnalysis, FrameType, PredMode};
 
 use crate::app::Message;
@@ -67,7 +66,7 @@ pub fn stream_view<'a>(index: &'a StreamIndex, current: u32) -> Element<'a, Mess
         let marker = if i == current { "▶" } else { " " };
         let head = format!(
             "{marker} AU {i} — {:?} POC {} — {} B @ {:#x}",
-            f.frame_type, f.poc, f.size_bytes, f.byte_offset
+            f.frame_type, f.poc, f.size_bytes, f.file_offset
         );
         col = col.push(nav_row_colored(
             head,
@@ -75,16 +74,25 @@ pub fn stream_view<'a>(index: &'a StreamIndex, current: u32) -> Element<'a, Mess
             theme::frame_type_color(f.frame_type),
         ));
         if i == current {
+            // NALs of the Annex B access unit; offsets are relative to it.
             for nal in &au.nals {
-                col = col.push(
-                    text(format!(
-                        "      {} — {} B @ {:#x}",
-                        nal.name,
-                        nal.size,
-                        f.byte_offset + nal.offset as u64
-                    ))
-                    .size(11),
-                );
+                let row = text(format!(
+                    "      {} — {} B @ +{:#x}{}",
+                    nal.name,
+                    nal.size,
+                    nal.offset,
+                    if nal.inserted {
+                        " (not in file: inserted for decoding)"
+                    } else {
+                        ""
+                    }
+                ))
+                .size(11);
+                col = col.push(if nal.inserted {
+                    row.color(theme::DIM)
+                } else {
+                    row
+                });
             }
         }
     }
@@ -212,7 +220,7 @@ pub fn block_view<'a>(
     pixel: Option<(u16, u16)>,
 ) -> Element<'a, Message> {
     let Some(a) = analysis else {
-        return container(text("no per-block analysis for this frame").size(12))
+        return container(text("no frame decoded yet").size(12))
             .padding(10)
             .into();
     };
@@ -442,7 +450,7 @@ pub fn stats_view<'a>(
         .info
         .duration_ns
         .filter(|&d| d > 0)
-        .map(|d| (index.es_size * 8) as f64 / (d as f64 / 1e9));
+        .map(|d| (index.video_bytes * 8) as f64 / (d as f64 / 1e9));
     if let Some(bps) = bitrate {
         col = col.push(stat_row(
             1,
@@ -540,9 +548,6 @@ pub fn stats_view<'a>(
             ));
             col = col.push(stat_row(1, "zero vectors", zero_mvs.to_string(), None));
         }
-    } else {
-        col = col.push(text("").size(6));
-        col = col.push(text("per-block stats need the analysis decoders").size(11));
     }
 
     scrollable(col.padding(10)).width(Fill).height(Fill).into()

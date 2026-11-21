@@ -1,4 +1,4 @@
-From bd813ec60582b4594f51e0660c0bbfec9107886b Mon Sep 17 00:00:00 2001
+From 74495490cbc68254965f0727fc8f6ed78a214b69 Mon Sep 17 00:00:00 2001
 From: Axel Tobieson <axel.tobieson@spiideo.com>
 Date: Tue, 7 Jul 2026 14:24:26 +0200
 Subject: [PATCH 4/6] feat: gate stage-plane export behind export_sl_stages
@@ -12,10 +12,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  3 files changed, 16 insertions(+), 3 deletions(-)
 
 diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
-index 868462d1d1..990584c4bb 100644
+index 22508f01..7c6da470 100644
 --- a/libavcodec/h264_slice.c
 +++ b/libavcodec/h264_slice.c
-@@ -534,9 +534,18 @@ static int h264_frame_start(H264Context *h)
+@@ -536,9 +536,18 @@ static int h264_frame_start(H264Context *h)
          ret = ff_h264_sl_analysis_alloc(h, pic);
          if (ret < 0)
              return ret;
@@ -38,10 +38,10 @@ index 868462d1d1..990584c4bb 100644
          h->sl_analysis_recs    = NULL;
          h->sl_stages_pred_y    = NULL;
 diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
-index 5f009493ca..ad977e42f7 100644
+index 8ce4e587..7e305e07 100644
 --- a/libavcodec/h264dec.c
 +++ b/libavcodec/h264dec.c
-@@ -1233,6 +1233,7 @@ static const AVOption h264_options[] = {
+@@ -1231,6 +1231,7 @@ static const AVOption h264_options[] = {
      { "skip_gray", "Do not return gray gap frames", OFFSET(skip_gray), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
      { "noref_gray", "Avoid using gray gap frames as references", OFFSET(noref_gray), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, VD },
      { "export_sl_analysis", "Export Streamlens per-MB analysis side data (requires threads=1)", OFFSET(export_sl_analysis), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
@@ -50,10 +50,10 @@ index 5f009493ca..ad977e42f7 100644
  };
  
 diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
-index 1fa0a3a9fe..d7103fcbb9 100644
+index 36016de0..42626187 100644
 --- a/libavcodec/h264dec.h
 +++ b/libavcodec/h264dec.h
-@@ -587,6 +587,9 @@ typedef struct H264Context {
+@@ -584,6 +584,9 @@ typedef struct H264Context {
  
      /** Streamlens: export per-MB analysis side data (AVOption "export_sl_analysis") */
      int export_sl_analysis;

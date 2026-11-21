@@ -1,4 +1,4 @@
-From cf3d18ffb16f131f8428916a9785b21cde680a62 Mon Sep 17 00:00:00 2001
+From cb75cb0ef87cdf11a78c38d0edfae99fe9c4f5f7 Mon Sep 17 00:00:00 2001
 From: Axel Tobieson <axel.tobieson@spiideo.com>
 Date: Tue, 7 Jul 2026 23:54:51 +0200
 Subject: [PATCH 6/6] feat(sl-h264): export per-MB coded block pattern (record
@@ -17,7 +17,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  3 files changed, 17 insertions(+), 6 deletions(-)
 
 diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
-index 46b281009f..6051258778 100644
+index cabad14f..4253d19e 100644
 --- a/libavcodec/h264_mb.c
 +++ b/libavcodec/h264_mb.c
 @@ -878,7 +878,11 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
@@ -35,10 +35,10 @@ index 46b281009f..6051258778 100644
      }
  }
 diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
-index 893aa1b5f5..a88dc3dc37 100644
+index 3a487196..9c55e7cb 100644
 --- a/libavcodec/h264dec.c
 +++ b/libavcodec/h264dec.c
-@@ -905,7 +905,8 @@ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
+@@ -903,7 +903,8 @@ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
          recs[i].qp                    = 0;
          recs[i].slice_id              = 0xFFFF;
          recs[i].mb_type               = 0;
@@ -49,7 +49,7 @@ index 893aa1b5f5..a88dc3dc37 100644
          memset(recs[i].mv,          0, sizeof(recs[i].mv));
          memset(recs[i].ref_idx,    -1, sizeof(recs[i].ref_idx));
 diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
-index b3e3ad2c62..541d9ceb60 100644
+index b3e3ad2c..541d9ceb 100644
 --- a/libavutil/sl_h264_analysis.h
 +++ b/libavutil/sl_h264_analysis.h
 @@ -45,7 +45,7 @@

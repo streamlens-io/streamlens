@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=StreamLens
+Comment=H.264/H.265 bitstream analyzer
+Exec=streamlens %f
+Icon=streamlens
+Categories=AudioVideo;Video;Development;
+MimeType=video/mp4;video/quicktime;video/x-matroska;video/webm;video/mp2t;video/h264;video/h265;video/x-msvideo;video/x-flv;
+Terminal=false

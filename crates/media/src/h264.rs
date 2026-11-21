@@ -1,32 +1,18 @@
-use std::sync::LazyLock;
-use std::sync::{Arc, Mutex};
+//! H.264 analysis decoder: libavcodec with the streamlens patches, which
+//! export one `SLH264MBRecord` per macroblock (and optional stage planes) as
+//! frame side data.
 
-use gst::glib;
-use gst::subclass::prelude::*;
-use gst_video::prelude::*;
-use gst_video::subclass::prelude::*;
-use gstreamer as gst;
-use gstreamer_video as gst_video;
-
-use streamlens_types::{
-    analysis::{
-        ArenaRange, BlockBits, CodingUnit, FrameAnalysis, InterInfo, IntraInfo, MotionVector,
-        PlanarImage, PredMode, PredictionUnit, Rect, SignedImage, StagePlanes, SuperBlock,
-        TransformUnit,
-    },
-    frame::Codec,
+use streamlens_types::analysis::{
+    ArenaRange, BlockBits, CodingUnit, FrameAnalysis, InterInfo, IntraInfo, MotionVector,
+    PlanarImage, PredMode, PredictionUnit, Rect, SignedImage, StagePlanes, Subsampling, SuperBlock,
+    TransformUnit,
 };
+use streamlens_types::frame::Codec;
 
+use crate::decode::{Decoder, Picture};
 use crate::ffi::ffmpeg::*;
-use crate::meta::AnalysisMeta;
-
-static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
-    gst::DebugCategory::new(
-        "slh264dec",
-        gst::DebugColorFlags::empty(),
-        Some("Streamlens H.264 analysis decoder (libavcodec)"),
-    )
-});
+use crate::ffi::{av_error_string, AVERROR_EAGAIN, AVERROR_EOF};
+use crate::Error;
 
 // MB_TYPE_* flags from libavcodec/mpegutils.h (verified against that header).
 const MB_TYPE_INTRA4X4: u32 = 1 << 0;
@@ -48,21 +34,11 @@ const FFMPEG_LEFT_DC_PRED: i8 = 9;
 const FFMPEG_TOP_DC_PRED: i8 = 10;
 const FFMPEG_DC_128_PRED: i8 = 11;
 
-// AVERROR(EAGAIN) = -EAGAIN, whose value is platform-dependent
-// (11 on Linux/Windows, 35 on macOS/BSD).
-const AVERROR_EAGAIN_VAL: i32 = -libc::EAGAIN;
-// AVERROR_EOF = FFERRTAG('E','O','F',' ') = -(MKTAG('E','O','F',' ')).
-// MKTAG = 'E'|('O'<<8)|('F'<<16)|(' '<<24) = 0x20464F45 = 541478725.
-const AVERROR_EOF_VAL: i32 = -541478725_i32;
-
 struct AvState {
     codec_ctx: *mut AVCodecContext,
     packet: *mut AVPacket,
     frame: *mut AVFrame,
 }
-
-// Raw pointers only accessed under the Mutex from the streaming thread.
-unsafe impl Send for AvState {}
 
 impl Drop for AvState {
     fn drop(&mut self) {
@@ -80,399 +56,130 @@ impl Drop for AvState {
     }
 }
 
-struct State {
+// The codec context is owned exclusively by its decoder.
+unsafe impl Send for AvState {}
+
+pub(crate) struct H264Decoder {
     av: AvState,
-    input_state: gst_video::VideoCodecState<'static, gst_video::video_codec_state::Readable>,
-    output_state:
-        Option<gst_video::VideoCodecState<'static, gst_video::video_codec_state::Readable>>,
     /// Previous frame's arena sizes (cus, pus, tus): pre-sizing avoids the
     /// realloc-copy chains that dominated I-frame analysis cost.
     arena_hint: (usize, usize, usize),
 }
 
-/// Decoded pixels + analysis for one frame (bridge between AVFrame lifetime and GStreamer output).
-struct DecodedFrame {
-    sfn: u32,
-    width: u32,
-    height: u32,
-    planes: [Vec<u8>; 3],
-    plane_w: [usize; 3],
-    plane_h: [usize; 3],
-    analysis: FrameAnalysis,
-}
-
-#[derive(Default)]
-pub struct SlH264Dec {
-    state: Mutex<Option<State>>,
-    /// Export predicted/unfiltered stage planes (costly: two frame copies
-    /// per picture) — enabled by the app only when a stage view is open.
-    stages: std::sync::atomic::AtomicBool,
-}
-
-#[glib::object_subclass]
-impl ObjectSubclass for SlH264Dec {
-    const NAME: &'static str = "GstSlH264Dec";
-    type Type = super::SlH264Dec;
-    type ParentType = gst_video::VideoDecoder;
-}
-
-impl ObjectImpl for SlH264Dec {
-    fn properties() -> &'static [glib::ParamSpec] {
-        static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            vec![glib::ParamSpecBoolean::builder("stages")
-                .nick("Export stage planes")
-                .blurb("Capture predicted/unfiltered reconstruction stages (extra copies)")
-                .default_value(false)
-                .build()]
-        });
-        PROPS.as_ref()
-    }
-
-    fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-        if pspec.name() == "stages" {
-            self.stages.store(
-                value.get().unwrap_or(false),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-    }
-
-    fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        match pspec.name() {
-            "stages" => self
-                .stages
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .to_value(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl GstObjectImpl for SlH264Dec {}
-
-impl ElementImpl for SlH264Dec {
-    fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
-        static META: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
-            gst::subclass::ElementMetadata::new(
-                "Streamlens H.264 Analysis Decoder",
-                "Codec/Decoder/Video",
-                "Decode H.264/AVC with per-macroblock analysis via patched libavcodec",
-                "streamlens",
-            )
-        });
-        Some(&*META)
-    }
-
-    fn pad_templates() -> &'static [gst::PadTemplate] {
-        static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-            let sink_caps = gst::Caps::builder("video/x-h264")
-                .field("stream-format", "byte-stream")
-                .field("alignment", "au")
-                .build();
-            let sink = gst::PadTemplate::new(
-                "sink",
-                gst::PadDirection::Sink,
-                gst::PadPresence::Always,
-                &sink_caps,
-            )
-            .unwrap();
-
-            let src_caps = gst_video::VideoCapsBuilder::new()
-                .format_list([gst_video::VideoFormat::I420])
-                .build();
-            let src = gst::PadTemplate::new(
-                "src",
-                gst::PadDirection::Src,
-                gst::PadPresence::Always,
-                &src_caps,
-            )
-            .unwrap();
-
-            vec![sink, src]
-        });
-        TEMPLATES.as_ref()
-    }
-}
-
-impl VideoDecoderImpl for SlH264Dec {
-    fn stop(&self) -> Result<(), gst::ErrorMessage> {
-        *self.state.lock().unwrap() = None;
-        self.parent_stop()
-    }
-
-    fn set_format(
-        &self,
-        input_state: &gst_video::VideoCodecState<'static, gst_video::video_codec_state::Readable>,
-    ) -> Result<(), gst::LoggableError> {
-        *self.state.lock().unwrap() = None;
-
-        let av = open_h264_decoder(self.stages.load(std::sync::atomic::Ordering::Relaxed))
-            .map_err(|e| gst::loggable_error!(CAT, "Failed to open H.264 decoder: {}", e))?;
-
-        *self.state.lock().unwrap() = Some(State {
-            av,
-            input_state: input_state.clone(),
-            output_state: None,
-            arena_hint: (0, 0, 0),
-        });
-
-        self.parent_set_format(input_state)
-    }
-
-    fn handle_frame(
-        &self,
-        frame: gst_video::VideoCodecFrame,
-    ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let input_buffer = frame.input_buffer_owned().ok_or(gst::FlowError::Error)?;
-        let sfn = frame.system_frame_number();
-
-        let data = input_buffer
-            .into_mapped_buffer_readable()
-            .map_err(|_| gst::FlowError::Error)?;
-
-        {
-            let mut guard = self.state.lock().unwrap();
-            let state = guard.as_mut().ok_or(gst::FlowError::Flushing)?;
-
-            unsafe {
-                av_packet_unref(state.av.packet);
-                (*state.av.packet).data = data.as_ptr() as *mut u8;
-                (*state.av.packet).size = data.len() as i32;
-                // Embed system_frame_number as pts for matching output frames.
-                (*state.av.packet).pts = sfn as i64;
-                (*state.av.packet).dts = sfn as i64;
-
-                let ret = avcodec_send_packet(state.av.codec_ctx, state.av.packet);
-                if ret < 0 && ret != AVERROR_EAGAIN_VAL {
-                    gst::error!(CAT, imp = self, "avcodec_send_packet error: {}", ret);
-                    return Err(gst::FlowError::Error);
-                }
-            }
-        }
-
-        drop(data); // safe to drop now; send_packet has consumed it
-
-        self.pull_decoded_frames(false)
-    }
-
-    fn flush(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
-        if let Some(state) = guard.as_mut() {
-            unsafe {
-                avcodec_flush_buffers(state.av.codec_ctx);
-            }
-            state.output_state = None;
-        }
-        true
-    }
-
-    fn drain(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, imp = self, "Draining");
-        {
-            let guard = self.state.lock().unwrap();
-            if let Some(state) = guard.as_ref() {
-                unsafe {
-                    avcodec_send_packet(state.av.codec_ctx, std::ptr::null());
-                }
-            }
-        }
-        self.pull_decoded_frames(true)?;
-        self.parent_drain()
-    }
-
-    fn finish(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, imp = self, "Finishing");
-        {
-            let guard = self.state.lock().unwrap();
-            if let Some(state) = guard.as_ref() {
-                unsafe {
-                    avcodec_send_packet(state.av.codec_ctx, std::ptr::null());
-                }
-            }
-        }
-        self.pull_decoded_frames(true)?;
-        self.parent_finish()
-    }
-}
-
-impl SlH264Dec {
-    /// Receive decoded frames from libavcodec, copy pixels + build analysis, then
-    /// push to GStreamer downstream.  When `exhaustive` is true, drains until EOS.
-    fn pull_decoded_frames(&self, exhaustive: bool) -> Result<gst::FlowSuccess, gst::FlowError> {
-        loop {
-            // Receive one frame under the lock and copy data out before releasing.
-            let decoded = {
-                let mut guard = self.state.lock().unwrap();
-                let state = guard.as_mut().ok_or(gst::FlowError::Flushing)?;
-
-                let ret = unsafe { avcodec_receive_frame(state.av.codec_ctx, state.av.frame) };
-
-                if ret == AVERROR_EAGAIN_VAL || ret == AVERROR_EOF_VAL {
-                    return Ok(gst::FlowSuccess::Ok);
-                }
-                if ret < 0 {
-                    gst::error!(CAT, imp = self, "avcodec_receive_frame error: {}", ret);
-                    return Err(gst::FlowError::Error);
-                }
-
-                // Copy everything from the AVFrame before we unref it.
-                let decoded =
-                    unsafe { extract_decoded_frame(state.av.frame, &mut state.arena_hint) };
-                unsafe { av_frame_unref(state.av.frame) };
-                decoded
-            };
-
-            self.output_decoded_frame(decoded)?;
-
-            if !exhaustive {
-                break Ok(gst::FlowSuccess::Ok);
-            }
-        }
-    }
-
-    fn output_decoded_frame(&self, df: DecodedFrame) -> Result<(), gst::FlowError> {
-        let instance = self.obj();
-
-        // Renegotiate output state if needed.
-        let needs_renegotiate = {
-            let guard = self.state.lock().unwrap();
-            let state = guard.as_ref().ok_or(gst::FlowError::Flushing)?;
-            state.output_state.as_ref().is_none_or(|os| {
-                let info = os.info();
-                info.width() != df.width || info.height() != df.height
-            })
-        };
-
-        if needs_renegotiate {
-            let input_state = {
-                self.state
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .ok_or(gst::FlowError::Flushing)?
-                    .input_state
-                    .clone()
-            };
-            let output_state = instance
-                .set_output_state(
-                    gst_video::VideoFormat::I420,
-                    df.width,
-                    df.height,
-                    Some(&input_state),
-                )
-                .map_err(|e| {
-                    gst::error!(CAT, imp = self, "set_output_state failed: {}", e);
-                    gst::FlowError::NotNegotiated
-                })?;
-            instance.negotiate(output_state).map_err(|e| {
-                gst::error!(CAT, imp = self, "negotiate failed: {}", e);
-                gst::FlowError::NotNegotiated
-            })?;
-
-            let new_os = instance
-                .output_state()
-                .ok_or(gst::FlowError::NotNegotiated)?;
-            let mut guard = self.state.lock().unwrap();
-            if let Some(state) = guard.as_mut() {
-                state.output_state = Some(new_os);
-            }
-        }
-
-        let output_state = {
-            self.state
-                .lock()
-                .unwrap()
-                .as_ref()
-                .ok_or(gst::FlowError::Flushing)?
-                .output_state
-                .clone()
-                .ok_or(gst::FlowError::NotNegotiated)?
-        };
-
-        let mut frame = instance.frame(df.sfn as i32).ok_or_else(|| {
-            gst::warning!(CAT, imp = self, "No frame for sfn {}", df.sfn);
-            gst::FlowError::Error
+impl H264Decoder {
+    pub(crate) fn open(stages: bool) -> Result<Self, Error> {
+        let av = open_h264_decoder(stages).map_err(|msg| Error::Ffmpeg {
+            call: "open H.264 decoder",
+            msg,
         })?;
+        Ok(Self {
+            av,
+            arena_hint: (0, 0, 0),
+        })
+    }
 
-        instance.allocate_output_frame(&mut frame, None)?;
-
-        // Copy pixel planes into the output buffer.
-        {
-            let out_buf = frame.output_buffer_mut().ok_or(gst::FlowError::Error)?;
-            let mut vframe =
-                gst_video::VideoFrameRef::from_buffer_ref_writable(out_buf, output_state.info())
-                    .map_err(|_| gst::FlowError::Error)?;
-
-            for plane_idx in 0..3usize {
-                let dst_stride = vframe.plane_stride()[plane_idx] as usize;
-                let dst_data = vframe
-                    .plane_data_mut(plane_idx as u32)
-                    .map_err(|_| gst::FlowError::Error)?;
-                let row_bytes = df.plane_w[plane_idx];
-                for row in 0..df.plane_h[plane_idx] {
-                    let src = &df.planes[plane_idx][row * row_bytes..(row + 1) * row_bytes];
-                    let dst = &mut dst_data[row * dst_stride..row * dst_stride + row_bytes];
-                    dst.copy_from_slice(src);
+    /// Collects every picture libavcodec has ready.
+    fn receive(&mut self, out: &mut Vec<Picture>) -> Result<(), Error> {
+        loop {
+            // SAFETY: the context and frame are valid for the decoder's
+            // lifetime; the frame is unreferenced after its data was copied.
+            unsafe {
+                match avcodec_receive_frame(self.av.codec_ctx, self.av.frame) {
+                    AVERROR_EAGAIN | AVERROR_EOF => return Ok(()),
+                    // A picture that failed to decode is skipped; the
+                    // caller sees its tag missing.
+                    e if e < 0 => {
+                        log::warn!("avcodec_receive_frame: {}", av_error_string(e));
+                        return Ok(());
+                    }
+                    _ => {}
                 }
+                let picture = extract_picture(self.av.frame, &mut self.arena_hint);
+                av_frame_unref(self.av.frame);
+                out.push(picture?);
             }
-            // vframe is dropped here, releasing the mutable borrow on out_buf.
         }
-
-        // Attach analysis meta now that the video frame mapping is released.
-        {
-            let out_buf = frame.output_buffer_mut().ok_or(gst::FlowError::Error)?;
-            AnalysisMeta::add(out_buf, Arc::new(df.analysis));
-        }
-
-        instance.finish_frame(frame)?;
-        Ok(())
     }
 }
 
-/// Extract pixel data and analysis from a decoded AVFrame (call before av_frame_unref).
-unsafe fn extract_decoded_frame(
+impl Decoder for H264Decoder {
+    fn decode(&mut self, au: &[u8], tag: u32, out: &mut Vec<Picture>) -> Result<(), Error> {
+        // SAFETY: the packet borrows `au` only for the send call;
+        // libavcodec copies non-refcounted packet data.
+        unsafe {
+            let pkt = self.av.packet;
+            av_packet_unref(pkt);
+            (*pkt).data = au.as_ptr() as *mut u8;
+            (*pkt).size = au.len() as i32;
+            // The tag rides on pts, which libavcodec carries to the frame
+            // decoded from this packet (also across frame threads).
+            (*pkt).pts = tag as i64;
+            loop {
+                match avcodec_send_packet(self.av.codec_ctx, pkt) {
+                    // Output must be drained before the packet is accepted.
+                    AVERROR_EAGAIN => self.receive(out)?,
+                    e if e < 0 => {
+                        log::warn!("avcodec_send_packet: {}", av_error_string(e));
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            (*pkt).data = std::ptr::null_mut();
+            (*pkt).size = 0;
+        }
+        self.receive(out)
+    }
+
+    fn finish(&mut self, out: &mut Vec<Picture>) -> Result<(), Error> {
+        // SAFETY: a null packet enters draining mode.
+        unsafe { avcodec_send_packet(self.av.codec_ctx, std::ptr::null()) };
+        self.receive(out)
+    }
+}
+
+/// Copies pixels and builds the analysis of a decoded AVFrame (call before
+/// av_frame_unref).
+unsafe fn extract_picture(
     avframe: *const AVFrame,
     arena_hint: &mut (usize, usize, usize),
-) -> DecodedFrame {
+) -> Result<Picture, Error> {
+    let format = (*avframe).format;
+    if format != AVPixelFormat_AV_PIX_FMT_YUV420P && format != AVPixelFormat_AV_PIX_FMT_YUVJ420P {
+        return Err(Error::UnsupportedFormat(format!(
+            "H.264 pixel format {format} (only 8-bit 4:2:0 is supported)"
+        )));
+    }
     let width = (*avframe).width as u32;
     let height = (*avframe).height as u32;
-    // pts was set to system_frame_number at send_packet time.
-    let sfn = (*avframe).pts as u32;
+    let tag = (*avframe).pts as u32;
 
-    // I420: Y full, Cb/Cr half-res.
-    let cw = (width as usize).div_ceil(2);
-    let ch = (height as usize).div_ceil(2);
-    let dims = [(width as usize, height as usize), (cw, ch), (cw, ch)];
-
-    let mut planes: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let mut plane_w = [0usize; 3];
-    let mut plane_h = [0usize; 3];
-
-    for i in 0..3usize {
-        let (pw, ph) = dims[i];
-        let stride = (*avframe).linesize[i] as usize;
-        let src_ptr = (*avframe).data[i];
-        let mut plane_data = Vec::with_capacity(pw * ph);
-        for row in 0..ph {
-            let src_row = std::slice::from_raw_parts(src_ptr.add(row * stride), pw);
-            plane_data.extend_from_slice(src_row);
-        }
-        planes[i] = plane_data;
-        plane_w[i] = pw;
-        plane_h[i] = ph;
-    }
-
-    let analysis = build_analysis_from_avframe(avframe, width, height, sfn as i32, arena_hint);
-    *arena_hint = (analysis.cus.len(), analysis.pus.len(), analysis.tus.len());
-
-    DecodedFrame {
-        sfn,
+    let mut image = PlanarImage {
         width,
         height,
-        planes,
-        plane_w,
-        plane_h,
-        analysis,
+        bit_depth: 8,
+        subsampling: Subsampling::Cs420,
+        planes: Vec::with_capacity(3),
+    };
+    for i in 0..3usize {
+        let (pw, ph) = image.plane_dims(i);
+        let (pw, ph) = (pw as usize, ph as usize);
+        let stride = (*avframe).linesize[i] as usize;
+        let src = (*avframe).data[i];
+        let mut plane = Vec::with_capacity(pw * ph);
+        for row in 0..ph {
+            plane.extend_from_slice(std::slice::from_raw_parts(src.add(row * stride), pw));
+        }
+        image.planes.push(plane);
     }
+
+    let analysis = build_analysis_from_avframe(avframe, width, height, tag as i32, arena_hint);
+    *arena_hint = (analysis.cus.len(), analysis.pus.len(), analysis.tus.len());
+    Ok(Picture {
+        tag,
+        image,
+        analysis,
+    })
 }
 
 /// Open a libavcodec H.264 decoder context with the streamlens analysis export enabled.

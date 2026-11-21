@@ -34,6 +34,7 @@ fn main() {
     // Relink when the vendored static libraries are rebuilt.
     for lib in [
         de265.join("lib/libde265.a"),
+        ffmpeg.join("lib/libavformat.a"),
         ffmpeg.join("lib/libavcodec.a"),
         ffmpeg.join("lib/libavutil.a"),
     ] {
@@ -67,21 +68,22 @@ fn main() {
         .write_to_file(out.join("de265_bindings.rs"))
         .expect("write de265 bindings");
 
-    // FFmpeg: minimal libavcodec decode API + our analysis side data.
+    // FFmpeg: demux + decode API, and our analysis side data.
     bindgen::Builder::default()
         .header_contents(
             "ffmpeg_wrapper.h",
-            "#include <libavcodec/avcodec.h>\n\
+            "#include <libavformat/avformat.h>\n\
+             #include <libavcodec/avcodec.h>\n\
              #include <libavutil/opt.h>\n\
              #include <libavutil/imgutils.h>\n\
              #include <libavutil/sl_h264_analysis.h>\n",
         )
         .clang_arg(format!("-I{}", ffmpeg.join("include").display()))
         .allowlist_function(
-            "avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*",
+            "avformat_.*|av_read_frame|av_seek_frame|avio_.*|avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*|av_strerror",
         )
-        .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID")
-        .allowlist_var("AV_.*|FF_.*|SL_H264.*")
+        .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID|AVMediaType|AVDiscard")
+        .allowlist_var("AV_.*|AVSEEK_.*|FF_.*|SL_H264.*")
         .layout_tests(layout_tests)
         .derive_default(true)
         .generate()
@@ -98,34 +100,25 @@ fn main() {
         ffmpeg.join("lib").display()
     );
     println!("cargo:rustc-link-lib=static=de265");
+    println!("cargo:rustc-link-lib=static=avformat");
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
 
+    // FFmpeg is configured with --disable-autodetect: no zlib, no system
+    // frameworks. libde265 is C++.
     match target_os.as_str() {
-        // libde265 is C++: libc++ on macOS, libstdc++ elsewhere.
         "macos" => {
             println!("cargo:rustc-link-lib=c++");
-            for fw in [
-                "CoreFoundation",
-                "CoreVideo",
-                "CoreMedia",
-                "VideoToolbox",
-                "CoreServices",
-            ] {
-                println!("cargo:rustc-link-lib=framework={fw}");
-            }
-            println!("cargo:rustc-link-lib=z");
             println!("cargo:rustc-link-lib=m");
         }
-        // MinGW (x86_64-pc-windows-gnu): no separate libm/libz, and
-        // libavutil's random_seed uses BCryptGenRandom.
+        // MinGW (x86_64-pc-windows-gnu): no separate libm, and libavutil's
+        // random_seed uses BCryptGenRandom.
         "windows" => {
             println!("cargo:rustc-link-lib=stdc++");
             println!("cargo:rustc-link-lib=bcrypt");
         }
         _ => {
             println!("cargo:rustc-link-lib=stdc++");
-            println!("cargo:rustc-link-lib=z");
             println!("cargo:rustc-link-lib=m");
         }
     }

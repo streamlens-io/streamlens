@@ -1,136 +1,149 @@
-use std::sync::LazyLock;
-use std::sync::{Arc, Mutex};
+//! H.265 analysis decoder: libde265 with the streamlens internals API
+//! (CB/PB/TU grids, intra directions, per-CB QP, per-CTB bits, stage
+//! planes).
 
-use gst::glib;
-use gst::subclass::prelude::*;
-use gst_video::prelude::*;
-use gst_video::subclass::prelude::*;
-use gstreamer as gst;
-use gstreamer_video as gst_video;
-
-use streamlens_types::{
-    analysis::{
-        ArenaRange, BlockBits, CodingUnit, FrameAnalysis, InterInfo, IntraInfo, MotionVector,
-        PlanarImage, PredMode, PredictionUnit, Rect, SignedImage, StagePlanes, SuperBlock,
-        TransformUnit,
-    },
-    frame::Codec,
+use streamlens_types::analysis::{
+    ArenaRange, BlockBits, CodingUnit, FrameAnalysis, InterInfo, IntraInfo, MotionVector,
+    PlanarImage, PredMode, PredictionUnit, Rect, SignedImage, StagePlanes, Subsampling, SuperBlock,
+    TransformUnit,
 };
+use streamlens_types::frame::Codec;
 
+use crate::decode::{Decoder, Picture};
 use crate::ffi::de265::*;
-use crate::meta::AnalysisMeta;
+use crate::Error;
 
-static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
-    gst::DebugCategory::new(
-        "slh265dec",
-        gst::DebugColorFlags::empty(),
-        Some("Streamlens HEVC analysis decoder (libde265)"),
-    )
-});
-
-struct State {
+pub(crate) struct H265Decoder {
     ctx: *mut de265_decoder_context,
-    input_state: gst_video::VideoCodecState<'static, gst_video::video_codec_state::Readable>,
-    output_state:
-        Option<gst_video::VideoCodecState<'static, gst_video::video_codec_state::Readable>>,
 }
 
-// de265_decoder_context is used from a single thread (we hold the Mutex).
-unsafe impl Send for State {}
+// The decoder context is owned exclusively by this value and libde265 is
+// driven from one thread at a time.
+unsafe impl Send for H265Decoder {}
 
-#[derive(Default)]
-pub struct SlH265Dec {
-    state: Mutex<Option<State>>,
-    /// Capture prediction/residual/unfiltered planes — enabled by the app
-    /// only when a stage view is open (per-TU copies are costly).
-    stages: std::sync::atomic::AtomicBool,
-}
-
-#[glib::object_subclass]
-impl ObjectSubclass for SlH265Dec {
-    const NAME: &'static str = "GstSlH265Dec";
-    type Type = super::SlH265Dec;
-    type ParentType = gst_video::VideoDecoder;
-}
-
-impl ObjectImpl for SlH265Dec {
-    fn properties() -> &'static [glib::ParamSpec] {
-        static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            vec![glib::ParamSpecBoolean::builder("stages")
-                .nick("Export stage planes")
-                .blurb("Capture prediction/residual/unfiltered stages (extra copies)")
-                .default_value(false)
-                .build()]
-        });
-        PROPS.as_ref()
-    }
-
-    fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-        if pspec.name() == "stages" {
-            self.stages.store(
-                value.get().unwrap_or(false),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+impl H265Decoder {
+    pub(crate) fn open(stages: bool) -> Result<Self, Error> {
+        // SAFETY: a fresh context; freed in Drop.
+        let ctx = unsafe { de265_new_decoder() };
+        if ctx.is_null() {
+            return Err(Error::Decoder("de265_new_decoder returned null".into()));
         }
+        enable_internals_params(ctx, stages);
+        Ok(Self { ctx })
     }
 
-    fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        match pspec.name() {
-            "stages" => self
-                .stages
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .to_value(),
-            _ => unreachable!(),
+    /// Runs the decoder until it needs more input, collecting every picture
+    /// it outputs. de265_decode advances roughly one NAL per call, and
+    /// multi-slice AUs (plus AUD) deposit several NALs per AU, so it must
+    /// run until it reports "waiting for input" (or `more == 0`).
+    fn run(&mut self, out: &mut Vec<Picture>) -> Result<(), Error> {
+        loop {
+            let mut more = 0i32;
+            // SAFETY: `ctx` is valid; a returned picture stays valid until
+            // the next decode call, and is copied out before that.
+            let (err, img) = unsafe {
+                let err = de265_decode(self.ctx, &mut more);
+                (err, de265_get_next_picture(self.ctx))
+            };
+            if !img.is_null() {
+                // de265_get_next_picture already pops the picture; it must
+                // not be released with de265_release_next_picture.
+                out.push(unsafe { extract_picture(img) }?);
+                continue;
+            }
+            if err == de265_error_DE265_ERROR_WAITING_FOR_INPUT_DATA || more == 0 {
+                return Ok(());
+            }
+            if err != de265_error_DE265_OK {
+                log::warn!("de265_decode error: {err}");
+            }
         }
     }
 }
-impl GstObjectImpl for SlH265Dec {}
 
-impl ElementImpl for SlH265Dec {
-    fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
-        static META: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
-            gst::subclass::ElementMetadata::new(
-                "Streamlens HEVC Analysis Decoder",
-                "Codec/Decoder/Video",
-                "Decode H.265/HEVC with per-block analysis via libde265 internals API",
-                "streamlens",
+impl Drop for H265Decoder {
+    fn drop(&mut self) {
+        // SAFETY: `ctx` came from de265_new_decoder and is freed once.
+        unsafe { de265_free_decoder(self.ctx) };
+    }
+}
+
+impl Decoder for H265Decoder {
+    fn decode(&mut self, au: &[u8], tag: u32, out: &mut Vec<Picture>) -> Result<(), Error> {
+        // SAFETY: libde265 copies the pushed bytes. The tag rides on the
+        // PTS, which libde265 attaches to the picture decoded from it.
+        let err = unsafe {
+            de265_push_data(
+                self.ctx,
+                au.as_ptr() as *const _,
+                au.len() as i32,
+                tag as i64,
+                std::ptr::null_mut(),
             )
-        });
-        Some(&*META)
+        };
+        if err != de265_error_DE265_OK {
+            return Err(Error::Decoder(format!("de265_push_data failed: {err}")));
+        }
+        self.run(out)
     }
 
-    fn pad_templates() -> &'static [gst::PadTemplate] {
-        static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-            let sink_caps = gst::Caps::builder("video/x-h265")
-                .field("stream-format", "byte-stream")
-                .field("alignment", "au")
-                .build();
-            let sink = gst::PadTemplate::new(
-                "sink",
-                gst::PadDirection::Sink,
-                gst::PadPresence::Always,
-                &sink_caps,
-            )
-            .unwrap();
-
-            let src_caps = gst_video::VideoCapsBuilder::new()
-                .format_list([
-                    gst_video::VideoFormat::I420,
-                    gst_video::VideoFormat::I42010le,
-                ])
-                .build();
-            let src = gst::PadTemplate::new(
-                "src",
-                gst::PadDirection::Src,
-                gst::PadPresence::Always,
-                &src_caps,
-            )
-            .unwrap();
-
-            vec![sink, src]
-        });
-        TEMPLATES.as_ref()
+    fn finish(&mut self, out: &mut Vec<Picture>) -> Result<(), Error> {
+        // SAFETY: `ctx` is valid.
+        unsafe { de265_flush_data(self.ctx) };
+        self.run(out)
     }
+}
+
+/// Copies pixels and builds the analysis of a decoded picture.
+unsafe fn extract_picture(img: *const de265_image) -> Result<Picture, Error> {
+    let width = de265_get_image_width(img, 0) as u32;
+    let height = de265_get_image_height(img, 0) as u32;
+    let bit_depth = de265_get_bits_per_pixel(img, 0);
+    let tag = de265_get_image_PTS(img) as u32;
+    let chroma = de265_get_chroma_format(img);
+    let (subsampling, channels) = if chroma == de265_chroma_de265_chroma_mono {
+        (Subsampling::Cs400, 1)
+    } else if chroma == de265_chroma_de265_chroma_420 {
+        (Subsampling::Cs420, 3)
+    } else if chroma == de265_chroma_de265_chroma_422 {
+        (Subsampling::Cs422, 3)
+    } else {
+        (Subsampling::Cs444, 3)
+    };
+
+    let mut image = PlanarImage {
+        width,
+        height,
+        bit_depth: bit_depth as u8,
+        subsampling,
+        planes: Vec::with_capacity(channels),
+    };
+    let bytes_per_sample = image.bytes_per_sample() as usize;
+    for channel in 0..channels as i32 {
+        let mut stride = 0i32;
+        let src = de265_get_image_plane(img, channel, &mut stride);
+        if src.is_null() {
+            return Err(Error::Decoder(format!("libde265 plane {channel} missing")));
+        }
+        let row_bytes = de265_get_image_width(img, channel) as usize * bytes_per_sample;
+        let rows = de265_get_image_height(img, channel) as usize;
+        let mut plane = Vec::with_capacity(row_bytes * rows);
+        for row in 0..rows {
+            plane.extend_from_slice(std::slice::from_raw_parts(
+                src.add(row * stride as usize),
+                row_bytes,
+            ));
+        }
+        image.planes.push(plane);
+    }
+
+    let poc = de265_internals_get_image_poc(img);
+    let analysis = build_analysis(img, width, height, poc);
+    Ok(Picture {
+        tag,
+        image,
+        analysis,
+    })
 }
 
 fn enable_internals_params(ctx: *mut de265_decoder_context, stages: bool) {
@@ -154,304 +167,6 @@ fn enable_internals_params(ctx: *mut de265_decoder_context, stages: bool) {
             1,
         );
     }
-}
-
-impl VideoDecoderImpl for SlH265Dec {
-    fn stop(&self) -> Result<(), gst::ErrorMessage> {
-        let mut guard = self.state.lock().unwrap();
-        if let Some(state) = guard.take() {
-            unsafe { de265_free_decoder(state.ctx) };
-        }
-        self.parent_stop()
-    }
-
-    fn set_format(
-        &self,
-        input_state: &gst_video::VideoCodecState<'static, gst_video::video_codec_state::Readable>,
-    ) -> Result<(), gst::LoggableError> {
-        let mut guard = self.state.lock().unwrap();
-
-        // Tear down any existing decoder.
-        if let Some(old) = guard.take() {
-            unsafe { de265_free_decoder(old.ctx) };
-        }
-
-        let ctx = unsafe { de265_new_decoder() };
-        if ctx.is_null() {
-            return Err(gst::loggable_error!(CAT, "de265_new_decoder returned null"));
-        }
-
-        enable_internals_params(ctx, self.stages.load(std::sync::atomic::Ordering::Relaxed));
-
-        *guard = Some(State {
-            ctx,
-            input_state: input_state.clone(),
-            output_state: None,
-        });
-
-        self.parent_set_format(input_state)
-    }
-
-    fn handle_frame(
-        &self,
-        frame: gst_video::VideoCodecFrame,
-    ) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let input_buffer = frame.input_buffer_owned().ok_or(gst::FlowError::Error)?;
-
-        let sfn = frame.system_frame_number();
-
-        let data = input_buffer
-            .into_mapped_buffer_readable()
-            .map_err(|_| gst::FlowError::Error)?;
-
-        {
-            let guard = self.state.lock().unwrap();
-            let state = guard.as_ref().ok_or(gst::FlowError::Flushing)?;
-
-            let err = unsafe {
-                // Pass system_frame_number as PTS so we can match output pictures to frames.
-                de265_push_data(
-                    state.ctx,
-                    data.as_ptr() as *const _,
-                    data.len() as i32,
-                    sfn as i64,
-                    std::ptr::null_mut(),
-                )
-            };
-            if err != de265_error_DE265_OK {
-                gst::error!(CAT, imp = self, "de265_push_data failed: {}", err);
-                return Err(gst::FlowError::Error);
-            }
-        }
-
-        drop(data);
-        self.drain_pictures()?;
-
-        Ok(gst::FlowSuccess::Ok)
-    }
-
-    fn flush(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
-        if let Some(state) = guard.as_mut() {
-            // Reset by freeing and re-creating the decoder.
-            unsafe {
-                de265_free_decoder(state.ctx);
-                let ctx = de265_new_decoder();
-                if !ctx.is_null() {
-                    enable_internals_params(
-                        ctx,
-                        self.stages.load(std::sync::atomic::Ordering::Relaxed),
-                    );
-                    state.ctx = ctx;
-                }
-            }
-            state.output_state = None;
-        }
-        true
-    }
-
-    fn drain(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, imp = self, "Draining");
-        {
-            let guard = self.state.lock().unwrap();
-            if let Some(state) = guard.as_ref() {
-                unsafe { de265_flush_data(state.ctx) };
-            }
-        }
-        self.drain_pictures()?;
-        self.parent_drain()
-    }
-
-    fn finish(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst::debug!(CAT, imp = self, "Finishing");
-        {
-            let guard = self.state.lock().unwrap();
-            if let Some(state) = guard.as_ref() {
-                unsafe { de265_flush_data(state.ctx) };
-            }
-        }
-        self.drain_pictures()?;
-        self.parent_finish()
-    }
-}
-
-impl SlH265Dec {
-    fn drain_pictures(&self) -> Result<gst::FlowSuccess, gst::FlowError> {
-        // de265_decode advances roughly one NAL per call; multi-slice AUs
-        // (plus AUD) deposit several NALs per input frame. The engine must
-        // run until it reports "waiting for input" (or `more == 0`), or the
-        // undecoded backlog grows by NALs-per-AU minus one every frame and
-        // upstream deadlocks once its feed window is exhausted.
-        loop {
-            let (err, more, img_ptr) = {
-                let guard = self.state.lock().unwrap();
-                let state = match guard.as_ref() {
-                    Some(s) => s,
-                    None => return Err(gst::FlowError::Flushing),
-                };
-                let mut more = 0i32;
-                let err = unsafe { de265_decode(state.ctx, &mut more) };
-                let img = unsafe { de265_get_next_picture(state.ctx) };
-                (err, more, img)
-            };
-
-            if !img_ptr.is_null() {
-                // NOTE: de265_get_next_picture already pops the picture; do NOT
-                // call de265_release_next_picture (per streamlens port semantics).
-                self.handle_picture(img_ptr)?;
-                continue;
-            }
-
-            if err == de265_error_DE265_ERROR_WAITING_FOR_INPUT_DATA || more == 0 {
-                break;
-            }
-            if err != de265_error_DE265_OK {
-                gst::warning!(CAT, imp = self, "de265_decode error: {}", err);
-            }
-        }
-        Ok(gst::FlowSuccess::Ok)
-    }
-
-    fn handle_picture(&self, img: *const de265_image) -> Result<gst::FlowSuccess, gst::FlowError> {
-        // Retrieve picture properties.
-        let (width, height, bit_depth) = unsafe {
-            let w = de265_get_image_width(img, 0) as u32;
-            let h = de265_get_image_height(img, 0) as u32;
-            let bd = de265_get_bits_per_pixel(img, 0);
-            (w, h, bd)
-        };
-
-        // The PTS we pushed was the system_frame_number.
-        let pts_val = unsafe { de265_get_image_PTS(img) };
-        let sfn = pts_val as u32;
-
-        // Negotiate output format based on bit depth.
-        let fmt = if bit_depth > 8 {
-            gst_video::VideoFormat::I42010le
-        } else {
-            gst_video::VideoFormat::I420
-        };
-
-        let instance = self.obj();
-
-        // Renegotiate if needed.
-        let needs_renegotiate = {
-            let guard = self.state.lock().unwrap();
-            let state = guard.as_ref().ok_or(gst::FlowError::Flushing)?;
-            match &state.output_state {
-                None => true,
-                Some(os) => {
-                    let info = os.info();
-                    info.format() != fmt || info.width() != width || info.height() != height
-                }
-            }
-        };
-
-        if needs_renegotiate {
-            let input_state = {
-                let guard = self.state.lock().unwrap();
-                guard
-                    .as_ref()
-                    .ok_or(gst::FlowError::Flushing)?
-                    .input_state
-                    .clone()
-            };
-            let output_state = instance
-                .set_output_state(fmt, width, height, Some(&input_state))
-                .map_err(|e| {
-                    gst::error!(CAT, imp = self, "set_output_state failed: {}", e);
-                    gst::FlowError::NotNegotiated
-                })?;
-            instance.negotiate(output_state).map_err(|e| {
-                gst::error!(CAT, imp = self, "negotiate failed: {}", e);
-                gst::FlowError::NotNegotiated
-            })?;
-
-            let new_os = instance
-                .output_state()
-                .ok_or(gst::FlowError::NotNegotiated)?;
-            let mut guard = self.state.lock().unwrap();
-            if let Some(state) = guard.as_mut() {
-                state.output_state = Some(new_os);
-            }
-        }
-
-        let output_state = {
-            let guard = self.state.lock().unwrap();
-            guard
-                .as_ref()
-                .ok_or(gst::FlowError::Flushing)?
-                .output_state
-                .clone()
-                .ok_or(gst::FlowError::NotNegotiated)?
-        };
-
-        let mut frame = instance.frame(sfn as i32).ok_or_else(|| {
-            gst::warning!(CAT, imp = self, "No frame for system_frame_number {}", sfn);
-            gst::FlowError::Error
-        })?;
-
-        instance.allocate_output_frame(&mut frame, None)?;
-
-        {
-            let out_buf = frame.output_buffer_mut().ok_or(gst::FlowError::Error)?;
-            let mut vframe =
-                gst_video::VideoFrameRef::from_buffer_ref_writable(out_buf, output_state.info())
-                    .map_err(|_| gst::FlowError::Error)?;
-
-            copy_de265_planes(img, &mut vframe, bit_depth)?;
-        }
-
-        // POC from the internals getter (replaces decode-order counter).
-        let poc = unsafe { de265_internals_get_image_poc(img) };
-
-        let analysis = build_analysis(img, width, height, poc);
-
-        // Attach AnalysisMeta to the output buffer.
-        {
-            let out_buf = frame.output_buffer_mut().ok_or(gst::FlowError::Error)?;
-            AnalysisMeta::add(out_buf, Arc::new(analysis));
-        }
-
-        instance.finish_frame(frame)?;
-        Ok(gst::FlowSuccess::Ok)
-    }
-}
-
-/// Copy luma + chroma planes from a de265_image into a GStreamer VideoFrame.
-fn copy_de265_planes(
-    img: *const de265_image,
-    vframe: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
-    bit_depth: i32,
-) -> Result<(), gst::FlowError> {
-    let bytes_per_sample = if bit_depth > 8 { 2usize } else { 1usize };
-
-    for channel in 0i32..3 {
-        let plane_idx = channel as usize;
-        let mut src_stride = 0i32;
-        let src_ptr = unsafe { de265_get_image_plane(img, channel, &mut src_stride) };
-        if src_ptr.is_null() {
-            return Err(gst::FlowError::Error);
-        }
-
-        let pw = unsafe { de265_get_image_width(img, channel) } as usize;
-        let ph = unsafe { de265_get_image_height(img, channel) } as usize;
-        let row_bytes = pw * bytes_per_sample;
-
-        let dst_stride = vframe.plane_stride()[plane_idx] as usize;
-        let dst_data = vframe
-            .plane_data_mut(plane_idx as u32)
-            .map_err(|_| gst::FlowError::Error)?;
-
-        for row in 0..ph {
-            let src_row = unsafe {
-                std::slice::from_raw_parts(src_ptr.add(row * src_stride as usize), row_bytes)
-            };
-            let dst_row = &mut dst_data[row * dst_stride..row * dst_stride + row_bytes];
-            dst_row.copy_from_slice(src_row);
-        }
-    }
-    Ok(())
 }
 
 /// Copy an internals plane (prediction or unfiltered) into a `PlanarImage`.

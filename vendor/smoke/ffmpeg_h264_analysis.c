@@ -219,9 +219,9 @@ int main(void)
                     }
                 }
 
-                /* Frame 0: assert header version == 2 and bits plausibility */
+                /* Frame 0: assert header version and bits plausibility */
                 if (frame_num == 0) {
-                    CHECK(hdr->version == 2, frame_num, -1);
+                    CHECK(hdr->version == SL_H264_ANALYSIS_VERSION, frame_num, -1);
 
                     /* >70% of MBs must have bits > 0 (IDR frame, all coded).
                      * CABAC approximation via log2(low) has ~1-bit precision; highly

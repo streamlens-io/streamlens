@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use streamlens_core::sweep::{Sweep, SweepFrame};
+use streamlens_core::Session;
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures")).join(name)
@@ -11,15 +12,14 @@ fn fixture(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn sweep_all_frames_present_nonzero_bits() {
-    streamlens_core::init().unwrap();
-
     let results: Arc<Mutex<Vec<(u32, SweepFrame)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
 
     let done_flag = Arc::new(Mutex::new(false));
     let done_clone = done_flag.clone();
 
-    let sweep = Sweep::spawn(fixture("h264_prog.mp4"), None, move |_done, batch| {
+    let session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
+    let sweep = Sweep::spawn(session.share(), None, move |_done, _total, batch| {
         let mut r = results_clone.lock().unwrap();
         r.extend(batch);
         // Check if we've received everything
@@ -75,15 +75,14 @@ fn sweep_all_frames_present_nonzero_bits() {
 
 #[test]
 fn sweep_psnr_with_reference() {
-    streamlens_core::init().unwrap();
-
     let results: Arc<Mutex<Vec<(u32, SweepFrame)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
 
+    let session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
     let _sweep = Sweep::spawn(
-        fixture("h264_prog.mp4"),
+        session.share(),
         Some(fixture("ref_320x240_i420.yuv")),
-        move |_done, batch| {
+        move |_done, _total, batch| {
             let mut r = results_clone.lock().unwrap();
             r.extend(batch);
         },

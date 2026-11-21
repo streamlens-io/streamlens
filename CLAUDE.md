@@ -1,35 +1,37 @@
 # streamlens — agent guide
 
-H.264/H.265 bitstream analyzer. GStreamer plumbing, patched
+H.264/H.265 bitstream analyzer. libavformat demuxing, patched
 decoders exposing per-block internals, iced 0.14 + wgpu UI. Read
 `docs/ARCHITECTURE.md` before touching anything non-trivial; it has the
 crate map, data flow, and a file-by-file reading order. `README.md` has
-build/run/usage and the `STREAMLENS_*` debug env hooks.
+build/run/usage. The `STREAMLENS_*` debug env hooks (start frame, stage,
+tab, overlays, bits split, zoom, play, settings dialog, window size) are read in
+`crates/app/src/app/mod.rs`, `update.rs` and `main.rs`.
 
 ## Hard rules
 
-- Never `git push`, in this repo or the decoder checkouts.
+- Never `git push`.
 - The analysis decoders are **patched vendored builds**, not crates.
-  `vendor/build-decoders.sh` fetches FFmpeg and libde265 at pinned commits,
-  applies `vendor/patches/{ffmpeg,libde265}/*.patch` and installs static
-  prefixes into `vendor/`. `crates/gst/build.rs` bindgens the installed
-  headers and watches the `.a` files, so a plain `cargo build` picks
-  changes up.
+  `vendor/build-decoders.sh` fetches FFmpeg (a release tag) and libde265 at
+  pinned commits, applies `vendor/patches/{ffmpeg,libde265}/*.patch` and
+  installs static prefixes into `vendor/`. `crates/media/build.rs` bindgens
+  the installed headers and watches the `.a` files, so a plain
+  `cargo build` picks changes up.
 
-  To change decoder C code: develop on the local branches
-  (`~/git/spiideo/official-gstreamer/FFmpeg` `streamlens-analysis`,
-  `.../libde265` `streamlens-internals`), commit there, then regenerate
-  the patch series with `git format-patch <base>..<branch>` into
-  `vendor/patches/` — the repo must stay buildable from patches alone
-  (CI builds them from scratch).
+  To change decoder C code: work in the checkout the script leaves in
+  `vendor/src/{ffmpeg,libde265}` (the patches are applied there as
+  commits), commit, then regenerate the series with
+  `git format-patch <pinned-commit>..HEAD` into `vendor/patches/` — the
+  repo must stay buildable from patches alone (CI builds them from
+  scratch).
 - Prefix contents and `vendor/smoke` binaries are gitignored — never commit
   built artifacts.
 
 ## Invariants (breaking these is a bug, not a style choice)
 
-- `crates/types` depends on nothing (no gst, no iced). GStreamer types stop
-  at `crates/gst`; iced types stop at `crates/app`. The UI talks only to
-  `streamlens-core`.
+- `crates/types` depends on nothing (no FFI, no iced). FFI stops at
+  `crates/media`; iced types stop at `crates/app`. The UI talks only to
+  `streamlens-core` (plus the `streamlens-types` data model).
 - `FrameAnalysis` block storage is arena-style (`ArenaRange` into flat
   vecs). Never reintroduce per-block `Vec`s — a 4K frame has ~32k MBs and
   per-block allocation measurably kills decode throughput.
@@ -37,23 +39,22 @@ build/run/usage and the `STREAMLENS_*` debug env hooks.
   extra full-frame copies, no per-redraw rebuilding of GPU instance data
   (cache by generation counters, rebuild on change only).
 - Expensive decoder features are opt-in: stage-plane capture sits behind
-  the elements' `stages` property; anything similarly costly must be
+  `open_decoder`'s `stages` flag; anything similarly costly must be
   toggleable and off during plain playback.
 - Syntax parsers use spec-exact field names in `r.ue("...")` calls — they
   render verbatim in the Headers panel — and return `Error`s/diagnostics,
   never panic on malformed input.
 - The blocking `Session` lives on the worker thread. Never call it from the
   UI thread; big data crosses threads as `Arc`, never cloned.
-- New codecs plug in via `AuAnalyzer` (syntax) + a new decoder element
-  (gst) + a `Codec` variant — no special-casing in core/app.
+- New codecs plug in via `AuAnalyzer` (syntax) + a new `Decoder` in
+  `crates/media` + a `Codec` variant — no special-casing in core/app.
 
 ## Verifying work
 
 - `just check` = fmt + clippy (`-D warnings`) + workspace tests. All green
   before any commit; don't weaken assertions to pass.
-- Decoder/element changes: `cargo test -p streamlens-gst --test elements`
-  (includes bit-exact pixel comparison against stock decoders) and the C
-  smoke tests in `vendor/smoke/`.
+- Decoder changes: `cargo test -p streamlens-media` (includes bit-exact
+  pixel comparison against the ffmpeg CLI) and `vendor/smoke/run.sh`.
 - Performance changes: `cargo test -p streamlens-core --test
   playback_smoothness` plus `just bench`; judge by measured fps/p99 gap,
   not by reasoning. `examples/play_bench.rs` and `examples/step_bench.rs`
@@ -69,5 +70,6 @@ build/run/usage and the `STREAMLENS_*` debug env hooks.
 - Match surrounding code. Comments only for non-obvious things (bit
   packing, spec clauses, capture points) — cite the spec/section or source
   file. No feature creep beyond what was asked; no half-implementations.
-- Conventional commits, focused; trailer:
-  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Focused commits. Title in imperative mood with a capital first letter
+  ("This commit will <title>"), no `type(scope):` prefix; a few body lines
+  on what was done. No AI co-author trailers.

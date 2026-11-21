@@ -18,6 +18,12 @@ $FF -f lavfi -i "$SRC" -c:v libx264 -flags +ilme+ildct -x264-params "tff=1" \
 $FF -f lavfi -i "$SRC" -c:v libx264 -profile:v main -bf 2 -g 25 \
     -pix_fmt yuv420p -f mpegts h264.ts
 
+# H.264 open GOP in MPEG-TS: non-IDR keyframes (recovery point SEI) whose
+# leading B-frames reference the previous GOP
+$FF -f lavfi -i "$SRC" -c:v libx264 -profile:v high -bf 2 -g 25 \
+    -x264-params "open-gop=1:keyint=25:min-keyint=25:scenecut=0" \
+    -pix_fmt yuv420p -f mpegts h264_opengop.ts
+
 # H.264 raw elementary stream (Annex B)
 $FF -f lavfi -i "$SRC" -c:v libx264 -profile:v high -bf 2 -g 25 \
     -slices 2 -pix_fmt yuv420p h264_prog.264

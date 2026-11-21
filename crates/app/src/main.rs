@@ -1,5 +1,6 @@
 mod app;
 mod panels;
+mod settings;
 mod stages;
 mod theme;
 mod widgets;
