@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<title>StreamLens · H.264 / H.265 bitstream analyzer</title>
+<meta name="description" content="StreamLens is an open-source H.264 / H.265 bitstream analyzer with self-contained packages for macOS, Linux and Windows. Frame sizes and types, per-block QP, motion vectors, partitions, prediction modes, decoder stages and header trees.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body { background: #0f1417; color: #c9ced6; font-family: "JetBrains Mono", monospace; font-size: 14px; line-height: 1.7; }
+  a { color: inherit; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 0 24px; }
+  .logo { width: 28px; height: 28px; flex: none; }
+
+  nav { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+  nav .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; }
+  nav b { font-family: "Space Grotesk", sans-serif; font-size: 18px; color: #e7e9ee; }
+  nav b span { color: #4fd0e0; }
+  nav .links { margin-left: auto; display: flex; gap: 20px; }
+  nav .links a { color: #8a939e; text-decoration: none; }
+  nav .links a:hover { color: #4fd0e0; }
+
+  .hero { padding: 56px 0 32px; }
+  h1 { font-family: "Space Grotesk", sans-serif; font-size: 38px; line-height: 1.15; color: #e7e9ee; font-weight: 700; letter-spacing: -0.01em; }
+  .hero p { margin-top: 16px; max-width: 640px; color: #9aa3ad; }
+  .shotbox { margin: 24px 0 56px; border: 1px solid #252d33; border-radius: 6px; overflow: hidden; }
+  .shot { display: block; width: 100%; height: auto; }
+
+  section { margin-bottom: 48px; scroll-margin-top: 24px; }
+  h2 { font-size: 14px; color: #4fd0e0; font-weight: 600; margin-bottom: 12px; }
+  h2::before { content: "## "; color: #4b555e; }
+
+  .tabs { display: flex; border-bottom: 1px solid #252d33; }
+  .tabs button { font: inherit; background: none; border: 0; color: #8a939e; padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; }
+  .tabs button:hover { color: #c9ced6; }
+  .tabs button.on { color: #e7e9ee; border-bottom-color: #4fd0e0; }
+  .panel { background: #151b1f; border: 1px solid #252d33; border-top: 0; padding: 20px; }
+  .panel[hidden] { display: none; }
+  .dlrow { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .dl { text-decoration: none; background: #4fd0e0; color: #0f1417; padding: 9px 16px; border-radius: 6px; font-weight: 600; white-space: nowrap; }
+  .dl:hover { background: #7fe0ec; }
+  .req { color: #8a939e; font-size: 13px; }
+  .files { margin: 16px 0 4px; display: grid; grid-template-columns: max-content 1fr; gap: 2px 20px; font-size: 13px; }
+  .files dt { color: #8a939e; }
+  .files dd { color: #d6dbe1; }
+  .steps { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #252d33; counter-reset: s; }
+  .steps > div { counter-increment: s; padding: 3px 0 3px 26px; position: relative; }
+  .steps > div::before { content: counter(s) "."; position: absolute; left: 0; color: #4fd0e0; }
+  .cmd-box { position: relative; margin-top: 8px; background: #0f1417; border: 1px solid #252d33; border-radius: 5px; }
+  .cmd-box pre { padding: 10px 76px 10px 12px; overflow-x: auto; color: #d6dbe1; font: inherit; }
+  .cmd-box .p { color: #4fd0e0; user-select: none; }
+  .copy { position: absolute; top: 7px; right: 8px; font: inherit; font-size: 12px; color: #8a939e; background: #1c2328; border: 1px solid #2c363d; border-radius: 5px; padding: 2px 10px; cursor: pointer; }
+  .copy:hover { color: #e7e9ee; border-color: #4fd0e0; }
+  .copy.done { color: #0f1417; background: #4fd0e0; border-color: #4fd0e0; }
+  .panel a:not(.dl), .lead a { color: #4fd0e0; }
+  .lead { margin-bottom: 14px; color: #9aa3ad; }
+  code { font: inherit; color: #e7e9ee; }
+  ul { list-style: none; }
+  li { padding: 2px 0; }
+  li::before { content: "▪ "; color: #ff5b5b; }
+  li:nth-child(even)::before { color: #5b9bff; }
+  li.more { color: #8a939e; padding-left: 2ch; letter-spacing: .15em; }
+  li.more::before { content: ""; }
+
+  .issue { display: flex; gap: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    border: 1px solid #252d33; background: #151b1f; padding: 18px 20px; border-radius: 6px; }
+  .issue p { max-width: 520px; }
+  .issue a { text-decoration: none; background: #4fd0e0; color: #0f1417; padding: 8px 14px; border-radius: 6px; font-weight: 600; white-space: nowrap; }
+
+  footer { border-top: 1px solid #252d33; padding: 24px 0 40px; color: #5f6a74; font-size: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+  footer a:hover { color: #4fd0e0; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="glyph" viewBox="80 80 370 370">
+    <rect x="95" y="95" width="70" height="70" rx="14" fill="#ff5b5b"/>
+    <rect x="185" y="95" width="70" height="70" rx="14" fill="#5b9bff"/>
+    <rect x="275" y="95" width="70" height="70" rx="14" fill="#5b9bff" opacity="0.5"/>
+    <rect x="95" y="185" width="70" height="70" rx="14" fill="#5b9bff" opacity="0.5"/>
+    <circle cx="300" cy="300" r="95" stroke="#4fd0e0" stroke-width="30" fill="none"/>
+    <path d="M368 368 L430 430" stroke="#4fd0e0" stroke-width="30" stroke-linecap="round"/>
+  </symbol>
+</svg>
+
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#top"><svg class="logo"><use href="#glyph"/></svg><b>Stream<span>Lens</span></b></a>
+    <div class="links">
+      <a href="#install">install</a>
+      <a href="#issues">issues</a>
+      <a href="https://github.com/streamlens-io/streamlens" target="_blank" rel="noopener">github</a>
+    </div>
+  </nav>
+
+  <div class="hero" id="top">
+    <h1>H.264 / H.265<br>bitstream analyzer</h1>
+    <p>Open source, with self-contained packages for macOS, Linux and Windows. Inspect frame sizes and types, per-block QP, prediction modes, motion vectors and partitions, decoder reconstruction stages and exact header syntax, at playback speed.</p>
+  </div>
+  <div class="shotbox"><img class="shot" alt="StreamLens main window with motion-vector and QP overlays on a B-frame" src="screenshot.jpg" width="1600" height="971"></div>
+
+  <section id="install">
+    <h2>install</h2>
+    <p class="lead">Self-contained packages. Nothing else needs to be installed.</p>
+    <div class="tabs" role="tablist">
+      <button class="on" data-t="mac">macOS</button><button data-t="linux">Linux</button><button data-t="win">Windows</button><button data-t="src">Source</button>
+    </div>
+
+    <div class="panel" data-p="mac">
+      <div class="dlrow"><a class="dl" href="https://github.com/streamlens-io/streamlens/releases/latest" target="_blank" rel="noopener">Download .dmg ↓</a><span class="req">macOS 11 or later</span></div>
+      <dl class="files">
+        <dt>Apple silicon</dt><dd>streamlens-&lt;version&gt;-aarch64-apple-darwin.dmg</dd>
+        <dt>Intel</dt><dd>streamlens-&lt;version&gt;-x86_64-apple-darwin.dmg</dd>
+      </dl>
+      <div class="steps">
+        <div>Open the .dmg and drag StreamLens to Applications.</div>
+        <div>The app is not notarized. On first launch, right-click → Open, or run:
+          <div class="cmd-box"><pre><span class="p">$ </span><span class="cmd">xattr -d com.apple.quarantine /Applications/StreamLens.app</span></pre><button class="copy">copy</button></div></div>
+      </div>
+    </div>
+
+    <div class="panel" data-p="linux" hidden>
+      <div class="dlrow"><a class="dl" href="https://github.com/streamlens-io/streamlens/releases/latest" target="_blank" rel="noopener">Download AppImage ↓</a><span class="req">glibc 2.35 or later (Ubuntu 22.04+)</span></div>
+      <dl class="files">
+        <dt>x86_64</dt><dd>streamlens-&lt;version&gt;-x86_64-unknown-linux-gnu.AppImage</dd>
+        <dt>aarch64</dt><dd>streamlens-&lt;version&gt;-aarch64-unknown-linux-gnu.AppImage</dd>
+      </dl>
+      <div class="steps">
+        <div>Make it executable and run it:
+          <div class="cmd-box"><pre><span class="p">$ </span><span class="cmd">chmod +x streamlens-*.AppImage</span>
+<span class="p">$ </span><span class="cmd">./streamlens-*.AppImage</span></pre><button class="copy">copy</button></div></div>
+      </div>
+      <p class="req" style="margin-top:12px">A .tar.gz with the bare binary is also on the release page.</p>
+    </div>
+
+    <div class="panel" data-p="win" hidden>
+      <div class="dlrow"><a class="dl" href="https://github.com/streamlens-io/streamlens/releases/latest" target="_blank" rel="noopener">Download .zip ↓</a><span class="req">Windows, x86_64</span></div>
+      <dl class="files">
+        <dt>x86_64</dt><dd>streamlens-&lt;version&gt;-x86_64-pc-windows-gnu.zip</dd>
+      </dl>
+      <div class="steps">
+        <div>Unzip and run <code>streamlens.exe</code>.</div>
+      </div>
+    </div>
+
+    <div class="panel" data-p="src" hidden>
+      <p class="req">Needs Rust (stable), git, cmake, a C/C++ toolchain, clang and nasm (x86_64). See the <a href="https://github.com/streamlens-io/streamlens#build-from-source" target="_blank" rel="noopener">README</a> for per-OS packages.</p>
+      <div class="cmd-box"><pre><span class="p">$ </span><span class="cmd">git clone https://github.com/streamlens-io/streamlens</span>
+<span class="p">$ </span><span class="cmd">cd streamlens</span>
+<span class="p">$ </span><span class="cmd">./vendor/build-decoders.sh</span>
+<span class="p">$ </span><span class="cmd">cargo run --release -p streamlens -- video.mp4</span></pre><button class="copy">copy</button></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>what it shows</h2>
+    <ul>
+      <li>Per-frame size and type chart (I / P / B)</li>
+      <li>Block overlays: QP, prediction modes, motion vectors, partitions, bits</li>
+      <li>Reconstruction views: predicted, unfiltered, residual</li>
+      <li>Exact VPS / SPS / PPS / slice header trees with spec field names</li>
+      <li>MP4, MKV, TS, raw Annex-B and other containers FFmpeg reads</li>
+      <li>Large files open at once; indexing runs in the background</li>
+      <li>H.264 and H.265, macOS / Linux / Windows</li>
+      <li class="more">...</li>
+    </ul>
+  </section>
+
+  <section id="issues">
+    <h2>report an issue</h2>
+    <div class="issue">
+      <p>StreamLens is under active development. Found a stream it handles wrong, or need a feature? Open an issue. Pull requests are welcome.</p>
+      <a href="https://github.com/streamlens-io/streamlens/issues/new" target="_blank" rel="noopener">Open an issue →</a>
+    </div>
+  </section>
+
+  <footer>
+    <span>MIT / Apache-2.0</span>
+    <a href="https://github.com/streamlens-io/streamlens" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/streamlens-io/streamlens/releases" target="_blank" rel="noopener">Releases</a>
+    <a href="https://github.com/streamlens-io/streamlens/issues" target="_blank" rel="noopener">Issues</a>
+    <span>Built in Rust with FFmpeg, libde265 and iced</span>
+  </footer>
+</div>
+
+<script>
+  document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+    const sec = b.closest("section");
+    sec.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+    sec.querySelectorAll(".panel").forEach(p => p.hidden = p.dataset.p !== b.dataset.t);
+  });
+
+  const plat = (navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
+  const os = plat.includes("win") ? "win" : plat.includes("linux") ? "linux" : null;
+  if (os) document.querySelector(`.tabs button[data-t="${os}"]`).click();
+
+  function writeClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+  function legacyCopy(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  document.querySelectorAll(".copy").forEach(btn => btn.onclick = () => {
+    const text = [...btn.closest('.cmd-box').querySelectorAll(".cmd")].map(c => c.textContent).join("\n");
+    writeClipboard(text).then(() => {
+      btn.textContent = "copied"; btn.classList.add("done");
+      setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("done"); }, 1500);
+    });
+  });
+</script>
+</body>
+</html>
