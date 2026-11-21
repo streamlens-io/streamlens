@@ -1,4 +1,4 @@
-From 92f3793502ea6c9bd520f9fe34c46aa9abf65c8b Mon Sep 17 00:00:00 2001
+From ad3684a1053597e9ffe036f0a85e0ee8727cf4ae Mon Sep 17 00:00:00 2001
 From: Axel Tobieson <axel.tobieson@spiideo.com>
 Date: Tue, 7 Jul 2026 10:57:15 +0200
 Subject: [PATCH 2/6] feat: add per-MB bit count to SLH264MBRecord (version 2)
@@ -28,7 +28,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  4 files changed, 49 insertions(+), 6 deletions(-)
 
 diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
-index 55f9d71a3e..78ca23289b 100644
+index 0842b1e3..b7f7b58f 100644
 --- a/libavcodec/h264_mb.c
 +++ b/libavcodec/h264_mb.c
 @@ -867,5 +867,6 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
@@ -39,10 +39,10 @@ index 55f9d71a3e..78ca23289b 100644
      }
  }
 diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
-index 71d5700b23..c370b2c1c8 100644
+index 8889b72e..2a81d1c2 100644
 --- a/libavcodec/h264_slice.c
 +++ b/libavcodec/h264_slice.c
-@@ -2621,7 +2621,20 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2632,7 +2632,20 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                  return AVERROR_INVALIDDATA;
              }
  
@@ -64,7 +64,7 @@ index 71d5700b23..c370b2c1c8 100644
  
              if (ret >= 0)
                  ff_h264_hl_decode_mb(h, sl);
-@@ -2630,7 +2643,17 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2641,7 +2654,17 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
              if (ret >= 0 && FRAME_MBAFF(h)) {
                  sl->mb_y++;
  
@@ -83,7 +83,7 @@ index 71d5700b23..c370b2c1c8 100644
  
                  if (ret >= 0)
                      ff_h264_hl_decode_mb(h, sl);
-@@ -2692,7 +2715,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2703,7 +2726,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                  return AVERROR_INVALIDDATA;
              }
  
@@ -96,7 +96,7 @@ index 71d5700b23..c370b2c1c8 100644
  
              if (ret >= 0)
                  ff_h264_hl_decode_mb(h, sl);
-@@ -2700,7 +2727,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2711,7 +2738,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
              // FIXME optimal? or let mb_decode decode 16x32 ?
              if (ret >= 0 && FRAME_MBAFF(h)) {
                  sl->mb_y++;
@@ -110,10 +110,10 @@ index 71d5700b23..c370b2c1c8 100644
                  if (ret >= 0)
                      ff_h264_hl_decode_mb(h, sl);
 diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
-index b09d42367b..475b2b8bab 100644
+index a73f5c28..5cacc59f 100644
 --- a/libavcodec/h264dec.h
 +++ b/libavcodec/h264dec.h
-@@ -333,6 +333,9 @@ typedef struct H264SliceContext {
+@@ -331,6 +331,9 @@ typedef struct H264SliceContext {
      int delta_poc[2];
      int curr_pic_num;
      int max_pic_num;
@@ -124,7 +124,7 @@ index b09d42367b..475b2b8bab 100644
  
  /**
 diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
-index 816990dc1c..ed9a4b1807 100644
+index 816990dc..ed9a4b18 100644
 --- a/libavutil/sl_h264_analysis.h
 +++ b/libavutil/sl_h264_analysis.h
 @@ -38,6 +38,7 @@

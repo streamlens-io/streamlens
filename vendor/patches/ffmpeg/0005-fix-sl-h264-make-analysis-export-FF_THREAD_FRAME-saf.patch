@@ -1,4 +1,4 @@
-From df7484b7b44f0c46012a0e3782b337d795000569 Mon Sep 17 00:00:00 2001
+From 74d416de4b9c8d2e34269d43fcfc0d08bf10436f Mon Sep 17 00:00:00 2001
 From: Axel Tobieson <axel.tobieson@spiideo.com>
 Date: Tue, 7 Jul 2026 14:57:08 +0200
 Subject: [PATCH 5/6] fix(sl-h264): make analysis export FF_THREAD_FRAME safe
@@ -29,7 +29,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  4 files changed, 28 insertions(+), 16 deletions(-)
 
 diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
-index 78ca23289b..46b281009f 100644
+index b7f7b58f..cabad14f 100644
 --- a/libavcodec/h264_mb.c
 +++ b/libavcodec/h264_mb.c
 @@ -849,20 +849,32 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
@@ -77,10 +77,10 @@ index 78ca23289b..46b281009f 100644
          }
  
 diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
-index ad977e42f7..893aa1b5f5 100644
+index 7e305e07..3a487196 100644
 --- a/libavcodec/h264dec.c
 +++ b/libavcodec/h264dec.c
-@@ -1232,7 +1232,7 @@ static const AVOption h264_options[] = {
+@@ -1230,7 +1230,7 @@ static const AVOption h264_options[] = {
      { "x264_build", "Assume this x264 version if no x264 version found in any SEI", OFFSET(x264_build), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, VD },
      { "skip_gray", "Do not return gray gap frames", OFFSET(skip_gray), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
      { "noref_gray", "Avoid using gray gap frames as references", OFFSET(noref_gray), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, VD },
@@ -90,10 +90,10 @@ index ad977e42f7..893aa1b5f5 100644
      { NULL },
  };
 diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
-index d7103fcbb9..df548720b3 100644
+index 42626187..f8fbbfd2 100644
 --- a/libavcodec/h264dec.h
 +++ b/libavcodec/h264dec.h
-@@ -597,7 +597,8 @@ typedef struct H264Context {
+@@ -594,7 +594,8 @@ typedef struct H264Context {
       * Indexed in RASTER order: mb_y * mb_width + mb_x (no stride padding).
       * NULL when export_sl_analysis is 0 or picture is not yet started.
       * Each MB record is filled by ff_h264_hl_decode_mb() and the side data
@@ -104,7 +104,7 @@ index d7103fcbb9..df548720b3 100644
      void *sl_analysis_recs; ///< SLH264MBRecord *, raster indexed
  
 diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
-index 08d57f0194..b3e3ad2c62 100644
+index 08d57f01..b3e3ad2c 100644
 --- a/libavutil/sl_h264_analysis.h
 +++ b/libavutil/sl_h264_analysis.h
 @@ -23,9 +23,8 @@

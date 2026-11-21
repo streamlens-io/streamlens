@@ -11,7 +11,7 @@
 set -euo pipefail
 
 FFMPEG_REPO=https://github.com/FFmpeg/FFmpeg.git
-FFMPEG_COMMIT=8d65da767b2b727a80672969f3120286ee478290
+FFMPEG_COMMIT=1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7 # n8.1.3
 LIBDE265_REPO=https://github.com/strukturag/libde265.git
 LIBDE265_COMMIT=4dd701fffac01632ffd5cabc5ef10deb56accba1
 

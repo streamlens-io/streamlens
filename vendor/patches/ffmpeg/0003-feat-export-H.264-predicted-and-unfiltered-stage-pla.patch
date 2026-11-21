@@ -1,4 +1,4 @@
-From d27247da923afa40cf3d417cca3f48f66cf36146 Mon Sep 17 00:00:00 2001
+From 82830cad1194cc0fc7676f05de320ebfa781bf4a Mon Sep 17 00:00:00 2001
 From: Axel Tobieson <axel.tobieson@spiideo.com>
 Date: Tue, 7 Jul 2026 13:27:57 +0200
 Subject: [PATCH 3/6] feat: export H.264 predicted and unfiltered stage planes
@@ -50,7 +50,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  7 files changed, 217 insertions(+), 2 deletions(-)
 
 diff --git a/libavcodec/h264_mb_template.c b/libavcodec/h264_mb_template.c
-index d5ea26a6e3..84f482b4fa 100644
+index ee8c81a1..3ccd58bf 100644
 --- a/libavcodec/h264_mb_template.c
 +++ b/libavcodec/h264_mb_template.c
 @@ -187,6 +187,33 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
@@ -88,7 +88,7 @@ index d5ea26a6e3..84f482b4fa 100644
                                 PIXEL_SHIFT, block_offset, linesize, dest_y, 0);
  
 @@ -244,6 +271,33 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
-                                           sl->non_zero_count_cache);
+                                      sl->non_zero_count_cache);
              }
          }
 +
@@ -122,10 +122,10 @@ index d5ea26a6e3..84f482b4fa 100644
  }
  
 diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
-index c370b2c1c8..868462d1d1 100644
+index 2a81d1c2..22508f01 100644
 --- a/libavcodec/h264_slice.c
 +++ b/libavcodec/h264_slice.c
-@@ -534,8 +534,17 @@ static int h264_frame_start(H264Context *h)
+@@ -536,8 +536,17 @@ static int h264_frame_start(H264Context *h)
          ret = ff_h264_sl_analysis_alloc(h, pic);
          if (ret < 0)
              return ret;
@@ -145,7 +145,7 @@ index c370b2c1c8..868462d1d1 100644
  
      h->cur_pic_ptr = pic;
 diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
-index 24125e8025..5f009493ca 100644
+index 9cefe97b..8ce4e587 100644
 --- a/libavcodec/h264dec.c
 +++ b/libavcodec/h264dec.c
 @@ -157,7 +157,13 @@ void ff_h264_free_tables(H264Context *h)
@@ -163,7 +163,7 @@ index 24125e8025..5f009493ca 100644
  
      av_refstruct_pool_uninit(&h->qscale_table_pool);
      av_refstruct_pool_uninit(&h->mb_type_pool);
-@@ -917,6 +923,72 @@ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
+@@ -915,6 +921,72 @@ int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic)
      return 0;
  }
  
@@ -237,10 +237,10 @@ index 24125e8025..5f009493ca 100644
  {
      int ret;
 diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
-index 475b2b8bab..1fa0a3a9fe 100644
+index 5cacc59f..36016de0 100644
 --- a/libavcodec/h264dec.h
 +++ b/libavcodec/h264dec.h
-@@ -597,6 +597,20 @@ typedef struct H264Context {
+@@ -594,6 +594,20 @@ typedef struct H264Context {
       * travels with the picture through the DPB, so reordering is safe.
       */
      void *sl_analysis_recs; ///< SLH264MBRecord *, raster indexed
@@ -261,7 +261,7 @@ index 475b2b8bab..1fa0a3a9fe 100644
  } H264Context;
  
  extern const uint16_t ff_h264_mb_sizes[4];
-@@ -699,6 +713,15 @@ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup);
+@@ -696,6 +710,15 @@ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup);
  /** Allocate the SL_H264_ANALYSIS side data blob on pic->f and set h->sl_analysis_recs. */
  int ff_h264_sl_analysis_alloc(H264Context *h, H264Picture *pic);
  
@@ -278,7 +278,7 @@ index 475b2b8bab..1fa0a3a9fe 100644
  int ff_h264_replace_picture(H264Picture *dst, const H264Picture *src);
  void ff_h264_unref_picture(H264Picture *pic);
 diff --git a/libavutil/frame.h b/libavutil/frame.h
-index 571411f5ea..cda3459105 100644
+index 131b373c..b9476c93 100644
 --- a/libavutil/frame.h
 +++ b/libavutil/frame.h
 @@ -270,6 +270,17 @@ enum AVFrameSideDataType {
@@ -300,7 +300,7 @@ index 571411f5ea..cda3459105 100644
  
  enum AVActiveFormatDescription {
 diff --git a/libavutil/side_data.c b/libavutil/side_data.c
-index 46c43fa5e2..4fac38498b 100644
+index 5308a53c..f3cc2652 100644
 --- a/libavutil/side_data.c
 +++ b/libavutil/side_data.c
 @@ -58,6 +58,7 @@ static const AVSideDataDescriptor sd_props[] = {
@@ -312,7 +312,7 @@ index 46c43fa5e2..4fac38498b 100644
  
  const AVSideDataDescriptor *av_frame_side_data_desc(enum AVFrameSideDataType type)
 diff --git a/libavutil/sl_h264_analysis.h b/libavutil/sl_h264_analysis.h
-index ed9a4b1807..08d57f0194 100644
+index ed9a4b18..08d57f01 100644
 --- a/libavutil/sl_h264_analysis.h
 +++ b/libavutil/sl_h264_analysis.h
 @@ -129,4 +129,49 @@ typedef struct SLH264MBRecord {
