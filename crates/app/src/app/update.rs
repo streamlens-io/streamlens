@@ -341,10 +341,26 @@ impl App {
             worker::Event::IndexProgress { frames, fraction } => {
                 self.indexing = Some((frames, fraction));
             }
-            worker::Event::Opened(index) => {
-                self.indexing = None;
-                // Reset sweep state for the new file.
+            worker::Event::Index(index) => {
+                // A late snapshot of a previously opened file.
+                if self.file.as_deref() != Some(index.path.as_path()) {
+                    return Task::none();
+                }
+                if index.complete {
+                    self.indexing = None;
+                }
                 let n = index.frames.len();
+                if self.index.is_some() {
+                    // The index grew: keep the position, extend the
+                    // per-frame state.
+                    self.sweep.resize(n, None);
+                    self.psnr_series.resize(n, None);
+                    self.bits_series.resize(n, None);
+                    self.sweep_total = self.sweep_total.max(n as u32);
+                    self.index = Some(index);
+                    return Task::none();
+                }
+                // First snapshot: the file is open. Reset sweep state.
                 self.sweep = vec![None; n];
                 self.sweep_done = 0;
                 self.sweep_total = n as u32;

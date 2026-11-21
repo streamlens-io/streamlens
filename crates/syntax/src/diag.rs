@@ -19,7 +19,7 @@ pub struct Diagnostic {
 }
 
 /// Collects diagnostics during a parse pass.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
     pub items: Vec<Diagnostic>,
 }

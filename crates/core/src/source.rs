@@ -1,13 +1,13 @@
 //! Reads access units back from the analyzed file: seek to a frame, then
-//! read forward in decode order. Packets are matched to frames by their
-//! (file offset, size), which the index pass recorded.
+//! read forward in decode order. After positioning, packets come in the
+//! order the index pass saw them, so each one is either the next frame
+//! (same file offset and size) or a packet that is no frame.
 
-use std::sync::Arc;
-
-use streamlens_media::Demuxer;
+use streamlens_media::{AccessUnit, Demuxer};
 use streamlens_syntax::analyzer::splice_at;
+use streamlens_types::FrameRecord;
 
-use crate::index::StreamIndex;
+use crate::index::IndexHandle;
 use crate::Error;
 
 /// One frame's access unit as read from the file.
@@ -22,7 +22,7 @@ pub(crate) struct Au {
 }
 
 pub(crate) struct AuReader {
-    index: Arc<StreamIndex>,
+    index: IndexHandle,
     demuxer: Demuxer,
     /// Decode index the next [`Self::next_au`] returns; `None` until
     /// positioned.
@@ -35,8 +35,8 @@ pub(crate) struct AuReader {
 }
 
 impl AuReader {
-    pub fn open(index: Arc<StreamIndex>) -> Result<Self, Error> {
-        let demuxer = Demuxer::open(&index.path)?;
+    pub fn open(index: IndexHandle) -> Result<Self, Error> {
+        let demuxer = Demuxer::open(&index.get().path)?;
         Ok(Self {
             index,
             demuxer,
@@ -51,14 +51,15 @@ impl AuReader {
         if self.next == Some(target) {
             return Ok(());
         }
-        let rec = &self.index.frames[target as usize];
+        let index = self.index.get();
+        let rec = &index.frames[target as usize];
         self.demuxer.seek(rec.dts.or(rec.pts), rec.file_offset)?;
-        if !self.scan_to(target)? {
+        if !self.scan_to(rec)? {
             // The seek landed past the target (imprecise timestamp index):
             // read from the start instead.
             log::warn!("seek to frame {target} overshot; rescanning from the start");
-            self.demuxer = Demuxer::open(&self.index.path)?;
-            if !self.scan_to(target)? {
+            self.demuxer = Demuxer::open(&index.path)?;
+            if !self.scan_to(rec)? {
                 return Err(Error::Pipeline(format!(
                     "frame {target} not found in the file"
                 )));
@@ -67,9 +68,9 @@ impl AuReader {
         Ok(())
     }
 
-    /// Reads forward until the packet of `target`. False when a later frame
-    /// shows up first.
-    fn scan_to(&mut self, target: u32) -> Result<bool, Error> {
+    /// Reads forward until the packet of `target`. False when a packet past
+    /// it shows up first.
+    fn scan_to(&mut self, target: &FrameRecord) -> Result<bool, Error> {
         self.next = None;
         self.pending = None;
         // Whatever precedes the target after a seek can be a partial packet;
@@ -79,14 +80,19 @@ impl AuReader {
             let Some(au) = self.demuxer.read()? else {
                 return Ok(false);
             };
-            match self.index.frame_at(au.file_offset, au.coded_size) {
-                Some(i) if i == target => {
-                    self.pending = Some(au.data.to_vec());
-                    self.next = Some(target);
-                    return Ok(true);
-                }
-                Some(i) if i > target => return Ok(false),
-                _ => {}
+            if is_frame(&au, target) {
+                self.pending = Some(au.data.to_vec());
+                self.next = Some(target.decode_index);
+                return Ok(true);
+            }
+            // Decode timestamps rise in decode order; without them (raw
+            // Annex B) file positions do.
+            let past = match (au.dts_ns, target.dts) {
+                (Some(d), Some(t)) => d > t,
+                _ => au.file_offset.is_some_and(|o| o > target.file_offset),
+            };
+            if past {
+                return Ok(false);
             }
         }
     }
@@ -96,6 +102,11 @@ impl AuReader {
         let i = self
             .next
             .ok_or_else(|| Error::Pipeline("reader not positioned".into()))?;
+        let index = self.index.get();
+        let rec = index
+            .frames
+            .get(i as usize)
+            .ok_or_else(|| Error::Pipeline(format!("frame {i} is not indexed yet")))?;
         let data = match self.pending.take() {
             Some(data) => data,
             None => loop {
@@ -103,18 +114,13 @@ impl AuReader {
                     .demuxer
                     .read()?
                     .ok_or_else(|| Error::Pipeline(format!("end of file before frame {i}")))?;
-                match self.index.frame_at(au.file_offset, au.coded_size) {
-                    Some(j) if j == i => break au.data.to_vec(),
-                    Some(j) => {
-                        return Err(Error::Pipeline(format!(
-                            "expected frame {i} in the file, read frame {j}"
-                        )))
-                    }
-                    None => self.carry.extend_from_slice(au.data),
+                if is_frame(&au, rec) {
+                    break au.data.to_vec();
                 }
+                self.carry.extend_from_slice(au.data);
             },
         };
-        let data = match self.index.insertions.get(&i) {
+        let data = match index.insertions.get(&i) {
             Some(ins) => splice_at(&data, ins.at as usize, &ins.bytes),
             None => data,
         };
@@ -125,4 +131,9 @@ impl AuReader {
             data,
         })
     }
+}
+
+/// Whether `au` is the packet of frame `rec`.
+fn is_frame(au: &AccessUnit<'_>, rec: &FrameRecord) -> bool {
+    au.file_offset == Some(rec.file_offset) && au.coded_size == rec.size_bytes
 }

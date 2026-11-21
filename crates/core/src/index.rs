@@ -3,11 +3,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use streamlens_syntax::diag::Diagnostics;
 use streamlens_syntax::AuSummary;
 use streamlens_types::{Codec, FrameRecord, StreamInfo};
+
+use crate::chunked::Chunked;
 
 /// Progress reported by the indexer while it runs.
 #[derive(Debug, Clone)]
@@ -25,7 +27,9 @@ pub struct ParamInsertion {
     pub bytes: Arc<[u8]>,
 }
 
-/// Result of indexing one video stream.
+/// Everything indexed so far about one video stream: a snapshot. While
+/// indexing runs, newer snapshots extend it (see [`IndexHandle`]); every
+/// frame in a snapshot is final, display position included.
 ///
 /// NAL offsets in `analysis` are relative to each frame's Annex B access
 /// unit as [`crate::source::AuReader`] produces it (insertions applied).
@@ -33,14 +37,14 @@ pub struct ParamInsertion {
 pub struct StreamIndex {
     pub codec: Codec,
     pub info: StreamInfo,
-    pub frames: Vec<FrameRecord>,
+    pub frames: Chunked<FrameRecord>,
     /// Per-frame syntax analysis (same order as `frames`).
-    pub analysis: Vec<AuSummary>,
+    pub analysis: Chunked<AuSummary>,
     /// Decode index at each display position (inverse of
     /// `FrameRecord::display_index`). Precomputed: the chart, ruler and
     /// playback look this up per bar/frame, and an O(n) scan there melts
     /// the UI on six-figure frame counts.
-    pub display_to_decode: Vec<u32>,
+    pub display_to_decode: Chunked<u32>,
     /// (min, max) slice QP across the stream, for chart scaling.
     pub qp_range: (i8, i8),
     /// Whole-stream aggregates for the Stats panel (computed once here so
@@ -53,8 +57,27 @@ pub struct StreamIndex {
     pub video_bytes: u64,
     /// Keyframes that get parameter sets inserted (decode index → what).
     pub insertions: HashMap<u32, ParamInsertion>,
-    /// (file offset, size) of each frame's packet → decode index.
-    pub(crate) packet_frames: HashMap<(u64, u32), u32>,
+    /// The whole file has been indexed; no snapshot will follow.
+    pub complete: bool,
+}
+
+/// The newest snapshot of an index that may still be growing. Cheap to
+/// clone; every holder sees each new snapshot.
+#[derive(Debug, Clone)]
+pub struct IndexHandle(Arc<RwLock<Arc<StreamIndex>>>);
+
+impl IndexHandle {
+    pub(crate) fn new(index: Arc<StreamIndex>) -> Self {
+        Self(Arc::new(RwLock::new(index)))
+    }
+
+    pub fn get(&self) -> Arc<StreamIndex> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn set(&self, index: Arc<StreamIndex>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = index;
+    }
 }
 
 /// Whole-stream aggregates shown in the Stats panel.
@@ -69,17 +92,11 @@ pub struct StreamStats {
 }
 
 impl StreamIndex {
-    /// The frame whose packet sits at `file_offset` with `size` bytes.
-    pub(crate) fn frame_at(&self, file_offset: Option<u64>, size: u32) -> Option<u32> {
-        self.packet_frames.get(&(file_offset?, size)).copied()
-    }
-
     /// Decode-order index of the closest random access point at or before
     /// `decode_index`.
     pub fn keyframe_before(&self, decode_index: u32) -> u32 {
-        self.frames[..=decode_index as usize]
-            .iter()
-            .rev()
+        self.frames
+            .iter_rev_to(decode_index as usize)
             .find(|f| f.is_keyframe)
             .map(|f| f.decode_index)
             .unwrap_or(0)

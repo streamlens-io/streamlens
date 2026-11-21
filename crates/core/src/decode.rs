@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use streamlens_media::{Decoder, Picture};
 use streamlens_types::{Codec, FrameAnalysis, PlanarImage};
 
-use crate::index::StreamIndex;
+use crate::index::{IndexHandle, StreamIndex};
 use crate::source::AuReader;
 use crate::Error;
 
@@ -35,7 +35,7 @@ pub struct DecodedFrame {
 
 /// Decodes frames of an indexed stream on demand.
 pub struct DecodeService {
-    index: Arc<StreamIndex>,
+    index: IndexHandle,
     /// Kept open across decoder restarts (opening probes the file); the
     /// decoder thread holds it while it runs.
     reader: Arc<Mutex<Option<AuReader>>>,
@@ -107,8 +107,9 @@ impl LiveDecoder {
                 target < self.fed && !self.finished
             } else {
                 let last_fed = self.fed.saturating_sub(1).max(self.start);
-                let next_segment = index.frames[last_fed as usize + 1..]
-                    .iter()
+                let next_segment = index
+                    .frames
+                    .iter_from(last_fed as usize + 1)
                     .find(|f| f.is_keyframe)
                     .map_or(n, |f| f.decode_index);
                 index.keyframe_before(target) <= next_segment
@@ -143,9 +144,9 @@ impl LiveDecoder {
 }
 
 impl DecodeService {
-    pub fn new(index: Arc<StreamIndex>) -> Self {
+    pub fn new(index: IndexHandle) -> Self {
         Self {
-            codec: index.codec,
+            codec: index.get().codec,
             index,
             reader: Arc::new(Mutex::new(None)),
             stages: false,
@@ -187,7 +188,7 @@ impl DecodeService {
         target: u32,
         budget: Option<Duration>,
     ) -> Result<(Vec<DecodedFrame>, bool), Error> {
-        let index = self.index.clone();
+        let index = self.index.get();
         let index = &*index;
         if !self
             .live
@@ -238,12 +239,13 @@ impl DecodeService {
             }
             // Out of input — the stream ended, or the whole window went
             // through the decoder without the target: drain the held-back
-            // pictures. A target that is still missing was dropped.
-            if !live.finish_sent && (live.fed >= n || live.consumed == live.fed) {
+            // pictures. A target that is still missing was dropped. (While
+            // indexing runs, the last indexed frame is no stream end.)
+            let stream_end = index.complete && live.fed >= n;
+            if !live.finish_sent && (stream_end || live.consumed == live.fed) {
                 log::debug!(
-                    "draining decoder for frame {target} (fed up to {}, stream end: {})",
+                    "draining decoder for frame {target} (fed up to {}, stream end: {stream_end})",
                     live.fed,
-                    live.fed >= n
                 );
                 send(&live.input, Input::Finish)?;
                 live.finish_sent = true;
@@ -320,7 +322,7 @@ fn send(input: &mpsc::Sender<Input>, msg: Input) -> Result<(), Error> {
 struct DecoderThread {
     decoder: Box<dyn Decoder>,
     reader: Arc<Mutex<Option<AuReader>>>,
-    index: Arc<StreamIndex>,
+    index: IndexHandle,
     start: u32,
     cancel: Arc<AtomicBool>,
 }

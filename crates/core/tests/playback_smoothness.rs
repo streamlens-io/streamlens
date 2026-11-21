@@ -27,9 +27,9 @@ fn assert_smooth(path: &std::path::Path, label: &str) {
     let (max_gap_ms, fps_factor) = if ci { (400, 0.60) } else { (100, 0.95) };
 
     let mut session = Session::open(path, |_| {}).unwrap();
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
     let nominal = session
-        .index
+        .index()
         .info
         .frame_rate
         .map(|(a, b)| a as f64 / b as f64)
@@ -84,7 +84,7 @@ fn smooth_hevc_10bit_mkv() {
 #[test]
 fn fast_mode_is_decode_bound() {
     let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
     let stats = measure_playback(&mut session, 0, true, n).unwrap();
     assert!(
         stats.fps > 100.0,
@@ -127,7 +127,7 @@ fn stress_4k60_h264() {
     }
 
     let mut session = Session::open(&path, |_| {}).unwrap();
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
     assert_eq!(n, 180, "3 s @ 60 fps");
 
     let stats = measure_playback(&mut session, 0, false, n).unwrap();
@@ -195,7 +195,7 @@ fn stress_4k30_short_gop() {
     }
 
     let mut session = Session::open(&path, |_| {}).unwrap();
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
 
     let stats = measure_playback(&mut session, 0, false, n).unwrap();
     eprintln!("4k30-g30 stats: {stats:?}");
@@ -245,7 +245,7 @@ fn stress_1080p120_h264() {
     }
 
     let mut session = Session::open(&path, |_| {}).unwrap();
-    let n = session.index.frames.len();
+    let n = session.index().frames.len();
     let stats = measure_playback(&mut session, 0, false, n).unwrap();
     eprintln!("1080p120 stats: {stats:?}");
     assert!(

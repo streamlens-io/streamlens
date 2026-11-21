@@ -11,13 +11,13 @@ fn main() {
         .unwrap_or(0);
 
     let mut session = Session::open(std::path::Path::new(&path), |_| {}).expect("open");
-    let f = &session.index.frames[idx as usize];
+    let f = &session.index().frames[idx as usize];
     println!(
         "frame {idx}: poc {} type {:?} refs L0 {:?} L1 {:?}",
         f.poc, f.frame_type, f.ref_frames[0], f.ref_frames[1]
     );
-    for n in idx.saturating_sub(2)..=(idx + 2).min(session.index.frames.len() as u32 - 1) {
-        let f = &session.index.frames[n as usize];
+    for n in idx.saturating_sub(2)..=(idx + 2).min(session.index().frames.len() as u32 - 1) {
+        let f = &session.index().frames[n as usize];
         println!("  #{n}: poc {} L0 {:?}", f.poc, f.ref_frames[0]);
     }
 

@@ -33,14 +33,16 @@ pub struct Sweep {
 impl Sweep {
     /// Spawns the sweep thread.
     ///
-    /// - `path`: the media file (Session::open is called independently).
+    /// - `session`: its own session on the stream (see
+    ///   [`Session::share`]); the sweep follows the index while it grows.
     /// - `ref_path`: optional raw planar YUV reference, one frame per
     ///   `display_index` (matching stream geometry).
-    /// - `on_batch`: called every 16 frames with `(frames_done, batch)`.
+    /// - `on_batch`: called every 16 frames with
+    ///   `(frames_done, frames_indexed, batch)`.
     pub fn spawn(
-        path: PathBuf,
+        session: Session,
         ref_path: Option<PathBuf>,
-        on_batch: impl Fn(u32, Vec<(u32, SweepFrame)>) + Send + 'static,
+        on_batch: impl Fn(u32, u32, Vec<(u32, SweepFrame)>) + Send + 'static,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
@@ -49,7 +51,7 @@ impl Sweep {
         std::thread::Builder::new()
             .name("sweep".into())
             .spawn(move || {
-                sweep_thread(path, ref_path, on_batch, cancel_clone, paused_clone);
+                sweep_thread(session, ref_path, on_batch, cancel_clone, paused_clone);
             })
             .expect("spawn sweep thread");
         Self { cancel, paused }
@@ -74,38 +76,43 @@ impl Drop for Sweep {
 }
 
 fn sweep_thread(
-    path: PathBuf,
+    mut session: Session,
     ref_path: Option<PathBuf>,
-    on_batch: impl Fn(u32, Vec<(u32, SweepFrame)>),
+    on_batch: impl Fn(u32, u32, Vec<(u32, SweepFrame)>),
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
 ) {
-    let mut session = match Session::open(&path, |_| {}) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("sweep: Session::open failed: {e}");
-            return;
-        }
-    };
-
     // The sweep only walks forward: keep no frames behind it.
     session.set_window(crate::cache::CacheWindow::new(0, 0));
 
-    let n = session.index.frames.len() as u32;
     let mut batch: Vec<(u32, SweepFrame)> = Vec::with_capacity(16);
-
-    for decode_idx in 0..n {
+    let mut decode_idx = 0u32;
+    loop {
         while paused.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if cancel.load(Ordering::Relaxed) {
             return;
         }
+        let index = session.index();
+        let n = index.frames.len() as u32;
+        if decode_idx >= n {
+            if index.complete {
+                if !batch.is_empty() {
+                    on_batch(decode_idx, n, batch);
+                }
+                return;
+            }
+            // Caught up with indexing: wait for the next snapshot.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
 
         let frame = match session.frame(decode_idx) {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("sweep: decode {decode_idx}: {e}");
+                decode_idx += 1;
                 continue;
             }
         };
@@ -123,7 +130,7 @@ fn sweep_thread(
 
         // PSNR: map decode index → display index → reference frame number.
         let psnr_y = ref_path.as_deref().and_then(|ref_path| {
-            let display_idx = session.index.frames[decode_idx as usize].display_index;
+            let display_idx = index.frames[decode_idx as usize].display_index;
             // Build a "like" template for read_yuv_frame geometry.
             let like = PlanarImage {
                 width: frame.image.width,
@@ -156,15 +163,11 @@ fn sweep_thread(
             },
         ));
 
+        decode_idx += 1;
         if batch.len() == 16 {
-            let done = decode_idx + 1;
-            on_batch(done, std::mem::take(&mut batch));
+            on_batch(decode_idx, n, std::mem::take(&mut batch));
             batch = Vec::with_capacity(16);
         }
-    }
-
-    if !batch.is_empty() {
-        on_batch(n, batch);
     }
 }
 

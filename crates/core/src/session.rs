@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::cache::{CacheWindow, FrameCache};
 use crate::decode::{DecodeService, DecodedFrame};
-use crate::index::{IndexProgress, StreamIndex};
-use crate::indexer::Indexer;
+use crate::index::{IndexHandle, IndexProgress, StreamIndex};
+use crate::indexer::{self, Indexer, Indexing, SharedAnalyzer};
 use crate::source::AuReader;
 use crate::Error;
 
@@ -23,29 +23,61 @@ pub fn estimated_frame_bytes(index: &StreamIndex, stages: bool) -> usize {
 }
 
 pub struct Session {
-    pub index: Arc<StreamIndex>,
+    index: IndexHandle,
     decode: DecodeService,
     cache: FrameCache,
     /// Reader for header re-parses, opened on first use (separate from the
     /// decoder's, which stays positioned for playback).
     headers_reader: Option<AuReader>,
-    /// Analyzer with final parameter-set state, for Headers-panel re-parses.
-    analyzer: Box<dyn streamlens_syntax::AuAnalyzer>,
+    /// Analyzer with the latest parameter-set state, for Headers-panel
+    /// re-parses.
+    analyzer: SharedAnalyzer,
+    /// Background indexing this session owns; dropping it stops indexing.
+    _indexing: Option<Indexing>,
 }
 
 impl Session {
-    /// Indexes `path` and prepares decoding. Blocking; run on a worker
-    /// thread and forward `progress` to the UI.
+    /// Indexes all of `path` and prepares decoding. Blocking; run on a
+    /// worker thread and forward `progress` to the UI.
     pub fn open(path: &Path, progress: impl FnMut(IndexProgress)) -> Result<Self, Error> {
         let (index, analyzer) = Indexer.index(path, progress)?;
-        let index = Arc::new(index);
-        Ok(Self {
+        let analyzer = Arc::new(std::sync::Mutex::new(analyzer));
+        Ok(Self::new(IndexHandle::new(Arc::new(index)), analyzer, None))
+    }
+
+    /// Starts indexing `path` in the background and returns as soon as the
+    /// first frames are indexed. `on_publish` sees every new snapshot of
+    /// the growing index (the first one included); [`Self::index`] always
+    /// returns the newest.
+    pub fn open_progressive(
+        path: &Path,
+        progress: impl FnMut(IndexProgress) + Send + 'static,
+        on_publish: impl Fn(&Arc<StreamIndex>) + Send + 'static,
+    ) -> Result<Self, Error> {
+        let (handle, analyzer, indexing) = indexer::start(path, progress, on_publish)?;
+        Ok(Self::new(handle, analyzer, Some(indexing)))
+    }
+
+    /// Another session on the same index (growing with it) and analyzer,
+    /// with its own decoder and frame cache.
+    pub fn share(&self) -> Self {
+        Self::new(self.index.clone(), self.analyzer.clone(), None)
+    }
+
+    fn new(index: IndexHandle, analyzer: SharedAnalyzer, indexing: Option<Indexing>) -> Self {
+        Self {
             decode: DecodeService::new(index.clone()),
             index,
             cache: FrameCache::new(CacheWindow::default()),
             headers_reader: None,
             analyzer,
-        })
+            _indexing: indexing,
+        }
+    }
+
+    /// The newest snapshot of the index.
+    pub fn index(&self) -> Arc<StreamIndex> {
+        self.index.get()
     }
 
     /// Field-level syntax trees of every NAL in the given frame's AU.
@@ -59,7 +91,8 @@ impl Session {
         let reader = self.headers_reader.as_mut().expect("opened above");
         reader.seek(decode_index)?;
         let au = reader.next_au()?;
-        Ok(self.analyzer.record_au(&au.data))
+        let analyzer = self.analyzer.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(analyzer.record_au(&au.data))
     }
 
     /// Returns the decoded frame at `decode_index`. On a miss the streaming
@@ -68,10 +101,10 @@ impl Session {
     pub fn frame(&mut self, decode_index: u32) -> Result<Arc<DecodedFrame>, Error> {
         // Stale requests (e.g. queued for a previously opened file) must
         // error, not index out of bounds.
-        if decode_index as usize >= self.index.frames.len() {
+        let n = self.index.get().frames.len();
+        if decode_index as usize >= n {
             return Err(Error::Pipeline(format!(
-                "frame {decode_index} out of range (stream has {} frames)",
-                self.index.frames.len()
+                "frame {decode_index} out of range (stream has {n} frames)"
             )));
         }
         // Explicit requests define the user position; eviction keeps the
@@ -98,10 +131,10 @@ impl Session {
         decode_index: u32,
         budget: std::time::Duration,
     ) -> Result<bool, Error> {
-        if decode_index as usize >= self.index.frames.len() {
+        let n = self.index.get().frames.len();
+        if decode_index as usize >= n {
             return Err(Error::Pipeline(format!(
-                "frame {decode_index} out of range (stream has {} frames)",
-                self.index.frames.len()
+                "frame {decode_index} out of range (stream has {n} frames)"
             )));
         }
         if self.cache.contains(decode_index) {

@@ -2,6 +2,7 @@
 //! thumbnails and metrics. This is the only crate the UI talks to.
 
 pub mod cache;
+pub mod chunked;
 pub mod decode;
 pub mod index;
 pub mod indexer;

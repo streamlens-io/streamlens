@@ -48,7 +48,9 @@ pub enum Event {
         frames: u32,
         fraction: Option<f32>,
     },
-    Opened(Arc<StreamIndex>),
+    /// A new snapshot of the index of the open file; the first one opens
+    /// it, later ones extend it while indexing runs.
+    Index(Arc<StreamIndex>),
     Frame(Arc<DecodedFrame>),
     Headers(u32, Arc<Vec<streamlens_core::RecordedNal>>),
     /// Playback reached the last frame (or failed) and stopped.
@@ -95,8 +97,7 @@ struct Worker {
     prefetch: Option<(u32, u32)>,
     /// Active sweep; dropping it cancels the thread.
     sweep: Option<Sweep>,
-    /// Inputs needed to (re)start the sweep.
-    path: Option<PathBuf>,
+    /// Reference YUV for the sweep's PSNR.
     ref_path: Option<PathBuf>,
     window: CacheWindow,
 }
@@ -109,7 +110,6 @@ impl Worker {
             play: None,
             prefetch: None,
             sweep: None,
-            path: None,
             ref_path: None,
             window: CacheWindow::default(),
         }
@@ -167,7 +167,7 @@ impl Worker {
         }
         // Idle: warm the cache one frame at a time.
         if let (Some(s), Some((next, until))) = (self.session.as_mut(), self.prefetch) {
-            if next <= until && (next as usize) < s.index.frames.len() {
+            if next <= until && (next as usize) < s.index().frames.len() {
                 self.prefetch = s.frame(next).is_ok().then_some((next + 1, until));
                 return true;
             }
@@ -234,9 +234,8 @@ impl Worker {
     fn open(&mut self, path: PathBuf) {
         self.play = None;
         self.prefetch = None;
-        self.sweep = None; // cancel; a new one starts after Opened
+        self.sweep = None; // cancel; a new one starts once the file is open
         self.session = None; // drop the previous stream before indexing
-        self.path = Some(path.clone());
 
         let tx = self.evt_tx.clone();
         let progress = move |p: streamlens_core::IndexProgress| {
@@ -245,10 +244,13 @@ impl Worker {
                 fraction: p.fraction,
             });
         };
-        match Session::open(&path, progress) {
+        let tx = self.evt_tx.clone();
+        let on_publish = move |index: &Arc<StreamIndex>| {
+            let _ = tx.unbounded_send(Event::Index(index.clone()));
+        };
+        match Session::open_progressive(&path, progress, on_publish) {
             Ok(mut s) => {
                 s.set_window(self.window);
-                self.send(Event::Opened(s.index.clone()));
                 self.session = Some(s);
                 self.restart_sweep();
             }
@@ -258,15 +260,14 @@ impl Worker {
 
     fn restart_sweep(&mut self) {
         self.sweep = None;
-        let (Some(path), Some(s)) = (self.path.clone(), self.session.as_ref()) else {
+        let Some(s) = self.session.as_ref() else {
             return;
         };
-        let total = s.index.frames.len() as u32;
         let tx = self.evt_tx.clone();
         self.sweep = Some(Sweep::spawn(
-            path,
+            s.share(),
             self.ref_path.clone(),
-            move |done, batch| {
+            move |done, total, batch| {
                 let _ = tx.unbounded_send(Event::Sweep { done, total, batch });
             },
         ));

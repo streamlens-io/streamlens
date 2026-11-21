@@ -10,7 +10,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
 #[test]
 fn decodes_frames_via_session() {
     let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
-    assert_eq!(session.index.frames.len(), 75);
+    assert_eq!(session.index().frames.len(), 75);
 
     // A mid-GOP frame: exercises decode-from-keyframe.
     let f10 = session.frame(10).unwrap();
@@ -119,7 +119,7 @@ fn backward_seek_before_pipeline_start_rebuilds() {
     // it could never emit (playback froze, seeking back hung).
     let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
     let k = session
-        .index
+        .index()
         .frames
         .iter()
         .filter(|f| f.is_keyframe)
@@ -147,7 +147,7 @@ fn hevc_open_gop_seek_handles_rasl() {
     // desync froze playback mid-file), and a RASL target must decode from
     // one keyframe earlier so its references exist.
     let mut session = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
-    let index = session.index.clone();
+    let index = session.index();
     let Some(r) = index
         .frames
         .iter()
@@ -174,10 +174,10 @@ fn hevc_open_gop_seek_handles_rasl() {
 #[test]
 fn hevc_end_to_end() {
     let mut session = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
-    assert_eq!(session.index.codec, streamlens_types::Codec::H265);
-    assert_eq!(session.index.frames.len(), 75);
-    assert_eq!(session.index.info.width, 320);
-    assert_eq!(session.index.info.height, 240);
+    assert_eq!(session.index().codec, streamlens_types::Codec::H265);
+    assert_eq!(session.index().frames.len(), 75);
+    assert_eq!(session.index().info.width, 320);
+    assert_eq!(session.index().info.height, 240);
 
     let f0 = session.frame(0).unwrap();
     assert_eq!(f0.image.width, 320);
@@ -230,13 +230,13 @@ fn assert_seek_labels_match_ffmpeg_at(path: &std::path::Path) {
     let name = path.display();
     let probe = Session::open(path, |_| {}).unwrap();
     let (w, h) = (
-        probe.index.info.width as usize,
-        probe.index.info.height as usize,
+        probe.index().info.width as usize,
+        probe.index().info.height as usize,
     );
-    let reference = ffmpeg_luma_frames(path, w, h, probe.index.info.bit_depth);
-    assert_eq!(reference.len(), probe.index.frames.len());
+    let reference = ffmpeg_luma_frames(path, w, h, probe.index().info.bit_depth);
+    assert_eq!(reference.len(), probe.index().frames.len());
     let keyframes: Vec<u32> = probe
-        .index
+        .index()
         .frames
         .iter()
         .filter(|f| f.is_keyframe)
@@ -246,7 +246,7 @@ fn assert_seek_labels_match_ffmpeg_at(path: &std::path::Path) {
 
     for (n, &k) in keyframes.iter().enumerate() {
         let mut session = Session::open(path, |_| {}).unwrap();
-        let index = session.index.clone();
+        let index = session.index();
         let end = keyframes
             .get(n + 1)
             .copied()
@@ -273,16 +273,16 @@ fn assert_seek_labels_match_ffmpeg_at(path: &std::path::Path) {
     // keyframe, not drop or mislabel it.
     let probe = Session::open(path, |_| {}).unwrap();
     let leading: Vec<u32> = probe
-        .index
+        .index()
         .frames
         .iter()
-        .filter(|f| f.is_rasl && !probe.index.is_undecodable_leading(f.decode_index))
+        .filter(|f| f.is_rasl && !probe.index().is_undecodable_leading(f.decode_index))
         .map(|f| f.decode_index)
         .collect();
     drop(probe);
     for t in leading {
         let mut session = Session::open(path, |_| {}).unwrap();
-        let display = session.index.frames[t as usize].display_index as usize;
+        let display = session.index().frames[t as usize].display_index as usize;
         let f = session
             .frame(t)
             .unwrap_or_else(|e| panic!("{name}: seek to leading frame {t}: {e}"));
@@ -302,7 +302,7 @@ fn seek_labels_match_ffmpeg_h264_closed_gop() {
 fn seek_labels_match_ffmpeg_h264_open_gop() {
     let index = Session::open(&fixture("h264_opengop.ts"), |_| {})
         .unwrap()
-        .index
+        .index()
         .clone();
     assert!(
         index
@@ -358,7 +358,7 @@ fn seek_into_raw_es_with_parameter_sets_only_at_start() {
 
     let session = Session::open(&path, |_| {}).unwrap();
     let keyframes = session
-        .index
+        .index()
         .frames
         .iter()
         .filter(|f| f.is_keyframe)
