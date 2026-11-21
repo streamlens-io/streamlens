@@ -6,9 +6,10 @@ third-party software:
 
 ## FFmpeg — LGPL-2.1-or-later (statically linked, modified)
 
-This software uses libraries from the FFmpeg project under the LGPLv2.1.
-The build enables only the H.264 decoder, a few demuxers and the file
-protocol; no GPL components are enabled. The sources are modified: the
+This software uses libraries from the FFmpeg project (libavformat,
+libavcodec, libavutil) under the LGPLv2.1. The build enables only the H.264
+decoder, the H.264/H.265 parsers, a few demuxers, the mp4toannexb bitstream
+filters and the file protocol; no GPL components are enabled. The sources are modified: the
 patches in `vendor/patches/ffmpeg/` add per-macroblock analysis export.
 License text: `licenses/LGPL-2.1.txt`. Source: <https://ffmpeg.org>, at the
 commit pinned in `vendor/build-decoders.sh`, plus the patches in this
@@ -23,10 +24,12 @@ stage export. License texts: `licenses/LGPL-3.0.txt` (which supplements
 at the commit pinned in `vendor/build-decoders.sh`, plus the patches in
 this repository.
 
-## GStreamer — LGPL-2.1-or-later (dynamically linked)
+## MinGW-w64 runtime (Windows builds only)
 
-Not distributed with streamlens; installed by the user and loaded at
-runtime. <https://gstreamer.freedesktop.org>
+The Windows package ships the MinGW-w64 runtime DLLs next to the
+executable: libstdc++ and libgcc (GPL-3.0 with the GCC Runtime Library
+Exception, which permits this distribution) and libwinpthread (MIT and BSD
+licenses). <https://www.mingw-w64.org>
 
 ## Relinking (LGPL compliance)
 
