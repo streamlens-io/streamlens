@@ -90,7 +90,7 @@ impl Session {
         decode_index: u32,
     ) -> Result<Vec<streamlens_syntax::analyzer::RecordedNal>, Error> {
         let f = &self.index.frames[decode_index as usize];
-        let au = self.es_bytes(f.byte_offset, f.size_bytes as usize)?;
+        let au = self.es_bytes(f.es_offset, f.es_size as usize)?;
         Ok(self.analyzer.record_au(&au))
     }
 

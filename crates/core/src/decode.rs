@@ -233,8 +233,8 @@ impl DecodeService {
                 && live.fed <= target.saturating_add(REORDER_AHEAD)
             {
                 let rec = &index.frames[live.fed as usize];
-                let mut data = vec![0u8; rec.size_bytes as usize];
-                crate::read_exact_at(&self.es_file, &mut data, rec.byte_offset)?;
+                let mut data = vec![0u8; rec.es_size as usize];
+                crate::read_exact_at(&self.es_file, &mut data, rec.es_offset)?;
                 send(
                     &live.input,
                     Input::Au {

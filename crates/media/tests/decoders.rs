@@ -10,16 +10,30 @@ fn fixture(name: &str) -> std::path::PathBuf {
 /// Decodes a whole fixture; pictures in output (display) order. Each AU is
 /// tagged with its decode index.
 fn decode_all(name: &str, stages: bool) -> Vec<Picture> {
+    decode_all_counting(name, stages).0
+}
+
+/// [`decode_all`] plus the number of access units fed.
+fn decode_all_counting(name: &str, stages: bool) -> (Vec<Picture>, u32) {
     let mut demuxer = Demuxer::open(&fixture(name)).expect("open fixture");
     let mut decoder = open_decoder(demuxer.codec(), stages).expect("open decoder");
+    // Out-of-band parameter sets (MP4/MKV) go in front of the first AU, as
+    // the decoder has to see them before any slice.
+    let mut pending = demuxer.config_nals().to_vec();
     let mut out = Vec::new();
     let mut tag = 0;
     while let Some(au) = demuxer.read().expect("demux") {
-        decoder.decode(au.data, tag, &mut out).expect("decode");
+        if pending.is_empty() {
+            decoder.decode(au.data, tag, &mut out).expect("decode");
+        } else {
+            pending.extend_from_slice(au.data);
+            decoder.decode(&pending, tag, &mut out).expect("decode");
+            pending.clear();
+        }
         tag += 1;
     }
     decoder.finish(&mut out).expect("finish");
-    out
+    (out, tag)
 }
 
 /// Every frame ffmpeg decodes from the fixture, as raw planar bytes in
@@ -53,10 +67,11 @@ fn assert_pixels_match_ffmpeg(name: &str, pix_fmt: &str) {
 }
 
 fn assert_every_tag_comes_back(name: &str) {
-    let pictures = decode_all(name, false);
+    let (pictures, fed) = decode_all_counting(name, false);
     let mut tags: Vec<u32> = pictures.iter().map(|p| p.tag).collect();
     tags.sort_unstable();
-    let expected: Vec<u32> = (0..pictures.len() as u32).collect();
+    let expected: Vec<u32> = (0..fed).collect();
+    assert!(fed > 0, "{name}: no access units");
     assert_eq!(tags, expected, "{name}: each AU's tag exactly once");
 }
 

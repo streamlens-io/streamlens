@@ -65,8 +65,13 @@ pub fn stream_view<'a>(index: &'a StreamIndex, current: u32) -> Element<'a, Mess
         let au = &index.analysis[i as usize];
         let marker = if i == current { "▶" } else { " " };
         let head = format!(
-            "{marker} AU {i} — {:?} POC {} — {} B @ {:#x}",
-            f.frame_type, f.poc, f.size_bytes, f.byte_offset
+            "{marker} AU {i} — {:?} POC {} — {} B{}",
+            f.frame_type,
+            f.poc,
+            f.size_bytes,
+            f.file_offset
+                .map(|o| format!(" @ {o:#x}"))
+                .unwrap_or_default()
         );
         col = col.push(nav_row_colored(
             head,
@@ -74,16 +79,25 @@ pub fn stream_view<'a>(index: &'a StreamIndex, current: u32) -> Element<'a, Mess
             theme::frame_type_color(f.frame_type),
         ));
         if i == current {
+            // NALs of the Annex B access unit; offsets are relative to it.
             for nal in &au.nals {
-                col = col.push(
-                    text(format!(
-                        "      {} — {} B @ {:#x}",
-                        nal.name,
-                        nal.size,
-                        f.byte_offset + nal.offset as u64
-                    ))
-                    .size(11),
-                );
+                let row = text(format!(
+                    "      {} — {} B @ +{:#x}{}",
+                    nal.name,
+                    nal.size,
+                    nal.offset,
+                    if nal.inserted {
+                        " (not in file: inserted for decoding)"
+                    } else {
+                        ""
+                    }
+                ))
+                .size(11);
+                col = col.push(if nal.inserted {
+                    row.color(theme::DIM)
+                } else {
+                    row
+                });
             }
         }
     }

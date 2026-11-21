@@ -125,6 +125,14 @@ fn index_into(
     let mut analysis: Vec<AuSummary> = Vec::new();
     let mut es_offset = 0u64;
 
+    // MP4/MKV keep the parameter sets in the track header; the analyzer
+    // needs them, but they belong to no frame (nor to the ES cache — the
+    // keyframes get them inserted below).
+    let config = demuxer.config_nals();
+    if !config.is_empty() {
+        analyzer.analyze(0, config, &mut diags);
+    }
+
     while let Some(au) = demuxer.read()? {
         let decode_index = frames.len() as u32;
         let Some(mut summary) = analyzer.analyze(decode_index, au.data, &mut diags) else {
@@ -143,8 +151,10 @@ fn index_into(
         frames.push(FrameRecord {
             decode_index,
             display_index: decode_index, // finalized below
-            byte_offset: es_offset,
-            size_bytes: bytes.len() as u32,
+            size_bytes: au.coded_size,
+            file_offset: au.file_offset,
+            es_offset,
+            es_size: bytes.len() as u32,
             frame_type: summary.frame_type,
             is_keyframe: summary.is_keyframe,
             is_idr: summary.is_idr,

@@ -16,6 +16,9 @@ pub struct NalSummary {
     pub raw_type: u8,
     pub name: &'static str,
     pub is_vcl: bool,
+    /// Not in the analyzed file: a parameter set inserted in front of a
+    /// keyframe so a decode can start there.
+    pub inserted: bool,
 }
 
 /// Everything the syntax layer learns about one access unit.
@@ -150,6 +153,7 @@ impl ParameterSetStore {
                 raw_type,
                 name,
                 is_vcl,
+                inserted: true,
             });
             block.extend_from_slice(&[0, 0, 0, 1]);
             block.extend_from_slice(nal);

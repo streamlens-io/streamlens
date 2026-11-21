@@ -17,11 +17,12 @@ pub struct IndexProgress {
 
 /// Result of indexing one video stream.
 ///
-/// `byte_offset` in each [`FrameRecord`] addresses the **normalized
+/// `es_offset`/`es_size` in each [`FrameRecord`] address the **normalized
 /// elementary stream** written to `es_cache_path` (Annex B, one AU after
-/// another, exactly as delivered by the parser). The hex viewer, NAL offsets
-/// and the decode service all address that file, independent of the original
-/// container.
+/// another, parameter sets in front of keyframes). NAL offsets, header
+/// re-parses and the decode service address that file, independent of the
+/// original container; `size_bytes`/`file_offset` describe the frame in the
+/// analyzed file.
 #[derive(Debug)]
 pub struct StreamIndex {
     pub codec: Codec,

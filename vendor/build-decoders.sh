@@ -50,8 +50,7 @@ build_ffmpeg() {
     am "$VENDOR"/patches/ffmpeg/*.patch
   rm -rf "$prefix" # no stale libraries from an earlier configure
   # libavformat demuxes every container the app opens; the analysis H.264
-  # decoder lives in libavcodec. The mp4toannexb filters normalize
-  # length-prefixed (avcC/hvcC) samples to Annex B access units.
+  # decoder lives in libavcodec.
   (cd "$dir" && ./configure \
     --prefix="$prefix" \
     --disable-everything --disable-programs --disable-doc \
@@ -62,7 +61,6 @@ build_ffmpeg() {
     --enable-demuxer=h264 --enable-demuxer=hevc --enable-demuxer=mov \
     --enable-demuxer=matroska --enable-demuxer=mpegts \
     --enable-demuxer=avi --enable-demuxer=flv \
-    --enable-bsf=h264_mp4toannexb --enable-bsf=hevc_mp4toannexb \
     --enable-protocol=file \
     --enable-static --disable-shared)
   make -C "$dir" -j"$JOBS"

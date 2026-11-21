@@ -6,14 +6,20 @@ use std::path::Path;
 
 use streamlens_types::Codec;
 
+use crate::annexb::{self, LengthPrefixed};
 use crate::ffi::ffmpeg::*;
-use crate::ffi::{av_error_string, AVERROR_EAGAIN, AVERROR_EOF, AV_NOPTS_VALUE};
+use crate::ffi::{av_error_string, AVERROR_EOF, AV_NOPTS_VALUE};
 use crate::Error;
 
-/// One access unit as read from the container. Borrows the demuxer's packet;
+/// One access unit as read from the container. Borrows the demuxer;
 /// valid until the next [`Demuxer::read`] call.
 pub struct AccessUnit<'a> {
+    /// Annex B bytes (length-prefixed samples are converted).
     pub data: &'a [u8],
+    /// Size of the packet in the file, as stored (before conversion).
+    pub coded_size: u32,
+    /// Byte position of the packet in the file, when the demuxer knows it.
+    pub file_offset: Option<u64>,
     pub pts_ns: Option<i64>,
     pub dts_ns: Option<i64>,
     pub duration_ns: Option<i64>,
@@ -26,13 +32,15 @@ pub struct AccessUnit<'a> {
 
 pub struct Demuxer {
     fmt: *mut AVFormatContext,
-    bsf: *mut AVBSFContext,
     pkt: *mut AVPacket,
     stream: i32,
     time_base: AVRational,
     codec: Codec,
     file_size: i64,
-    eof_sent: bool,
+    /// Set for MP4/MKV/FLV-style tracks; `None` for Annex B tracks.
+    length_prefixed: Option<LengthPrefixed>,
+    /// Conversion buffer for length-prefixed samples.
+    buf: Vec<u8>,
 }
 
 // The FFmpeg contexts are owned exclusively by this value.
@@ -43,13 +51,13 @@ impl Demuxer {
         let cpath = path_to_cstring(path)?;
         let mut d = Demuxer {
             fmt: std::ptr::null_mut(),
-            bsf: std::ptr::null_mut(),
             pkt: std::ptr::null_mut(),
             stream: -1,
             time_base: AVRational { num: 0, den: 1 },
             codec: Codec::H264,
             file_size: -1,
-            eof_sent: false,
+            length_prefixed: None,
+            buf: Vec::new(),
         };
         // SAFETY: every pointer is checked before use; `d`'s Drop frees
         // whatever was allocated when an early return happens.
@@ -94,26 +102,13 @@ impl Demuxer {
                 return Err(Error::NoVideoStream);
             }
 
-            // Length-prefixed samples (MP4/MKV) become Annex B; Annex B
-            // input passes through unchanged.
-            let filter = av_bsf_get_by_name(match d.codec {
-                Codec::H264 => c"h264_mp4toannexb".as_ptr(),
-                Codec::H265 => c"hevc_mp4toannexb".as_ptr(),
-            });
-            if filter.is_null() {
-                return Err(Error::Ffmpeg {
-                    call: "av_bsf_get_by_name",
-                    msg: "mp4toannexb filter not built".into(),
-                });
-            }
-            check("av_bsf_alloc", av_bsf_alloc(filter, &mut d.bsf))?;
-            let st = *(*d.fmt).streams.add(d.stream as usize);
-            check(
-                "avcodec_parameters_copy",
-                avcodec_parameters_copy((*d.bsf).par_in, (*st).codecpar),
-            )?;
-            (*d.bsf).time_base_in = (*st).time_base;
-            check("av_bsf_init", av_bsf_init(d.bsf))?;
+            let par = (*(*(*d.fmt).streams.add(d.stream as usize))).codecpar;
+            let extradata = if (*par).extradata.is_null() || (*par).extradata_size <= 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts((*par).extradata, (*par).extradata_size as usize)
+            };
+            d.length_prefixed = annexb::parse_config(d.codec, extradata)?;
 
             d.pkt = av_packet_alloc();
             if d.pkt.is_null() {
@@ -133,6 +128,16 @@ impl Demuxer {
         self.codec
     }
 
+    /// Parameter sets (and any SEI) the container keeps out of band in its
+    /// decoder configuration record, as Annex B; empty for Annex B tracks,
+    /// which carry them in-band. They apply to the whole track and are part
+    /// of no access unit.
+    pub fn config_nals(&self) -> &[u8] {
+        self.length_prefixed
+            .as_ref()
+            .map_or(&[][..], |l| &l.config_nals)
+    }
+
     /// Next access unit in decode order; `None` at the end of the stream.
     pub fn read(&mut self) -> Result<Option<AccessUnit<'_>>, Error> {
         // SAFETY: the contexts were initialized in `open` and are only used
@@ -140,47 +145,38 @@ impl Demuxer {
         unsafe {
             loop {
                 av_packet_unref(self.pkt);
-                match av_bsf_receive_packet(self.bsf, self.pkt) {
-                    0 => return Ok(Some(self.access_unit())),
+                match av_read_frame(self.fmt, self.pkt) {
                     AVERROR_EOF => return Ok(None),
-                    AVERROR_EAGAIN if !self.eof_sent => self.feed_filter()?,
-                    AVERROR_EAGAIN => return Ok(None),
-                    e => return Err(ffmpeg_error("av_bsf_receive_packet", e)),
+                    e if e < 0 => return Err(ffmpeg_error("av_read_frame", e)),
+                    _ if (*self.pkt).stream_index != self.stream => continue,
+                    _ => {}
                 }
+                let p = &*self.pkt;
+                let packet = if p.data.is_null() || p.size <= 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(p.data, p.size as usize)
+                };
+                if let Some(lp) = &self.length_prefixed {
+                    annexb::convert_sample(packet, lp.length_size, &mut self.buf)?;
+                }
+                return Ok(Some(self.access_unit(packet)));
             }
         }
     }
 
-    /// Reads packets until one of the selected track reaches the filter (or
-    /// signals end of input to it).
-    unsafe fn feed_filter(&mut self) -> Result<(), Error> {
-        loop {
-            match av_read_frame(self.fmt, self.pkt) {
-                AVERROR_EOF => {
-                    self.eof_sent = true;
-                    return check(
-                        "av_bsf_send_packet",
-                        av_bsf_send_packet(self.bsf, std::ptr::null_mut()),
-                    );
-                }
-                e if e < 0 => return Err(ffmpeg_error("av_read_frame", e)),
-                _ if (*self.pkt).stream_index != self.stream => av_packet_unref(self.pkt),
-                // The filter takes over the packet's reference.
-                _ => return check("av_bsf_send_packet", av_bsf_send_packet(self.bsf, self.pkt)),
-            }
-        }
-    }
-
-    unsafe fn access_unit(&self) -> AccessUnit<'_> {
+    unsafe fn access_unit<'a>(&'a self, packet: &'a [u8]) -> AccessUnit<'a> {
         let p = &*self.pkt;
-        let data = if p.data.is_null() || p.size <= 0 {
-            &[][..]
+        let data = if self.length_prefixed.is_some() {
+            &self.buf[..]
         } else {
-            std::slice::from_raw_parts(p.data, p.size as usize)
+            packet
         };
         let ns = |ts: i64| (ts != AV_NOPTS_VALUE).then(|| to_ns(ts, self.time_base));
         AccessUnit {
             data,
+            coded_size: packet.len() as u32,
+            file_offset: (p.pos >= 0).then_some(p.pos as u64),
             pts_ns: ns(p.pts),
             dts_ns: ns(p.dts),
             duration_ns: (p.duration > 0).then(|| to_ns(p.duration, self.time_base)),
@@ -196,7 +192,6 @@ impl Drop for Demuxer {
         // SAFETY: the free functions accept null and reset the pointers.
         unsafe {
             av_packet_free(&mut self.pkt);
-            av_bsf_free(&mut self.bsf);
             avformat_close_input(&mut self.fmt);
         }
     }

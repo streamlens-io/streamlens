@@ -70,6 +70,7 @@ impl AuAnalyzer for H265Analyzer {
                 raw_type,
                 name: nal_type.name(),
                 is_vcl: nal_type.is_vcl(),
+                inserted: false,
             });
 
             let (rbsp, _) = unescape_rbsp(nal.bytes);

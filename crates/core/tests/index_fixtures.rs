@@ -28,7 +28,7 @@ fn assert_h264_fixture_shape(idx: &streamlens_core::StreamIndex, container: &str
     let f0 = &idx.frames[0];
     assert_eq!(f0.frame_type, FrameType::I);
     assert!(f0.is_idr && f0.is_keyframe);
-    assert_eq!(f0.byte_offset, 0);
+    assert_eq!(f0.es_offset, 0);
     assert!(idx.frames.iter().any(|f| f.frame_type == FrameType::B));
 
     // ES offsets are contiguous and sizes sum to the cache size.
@@ -37,9 +37,9 @@ fn assert_h264_fixture_shape(idx: &streamlens_core::StreamIndex, container: &str
         if let Some(e) = expect {
             // Parameter-set-only stretches may sit between AUs, so offsets
             // are monotonically non-decreasing, never overlapping.
-            assert!(f.byte_offset >= e, "overlapping AU at {}", f.decode_index);
+            assert!(f.es_offset >= e, "overlapping AU at {}", f.decode_index);
         }
-        expect = Some(f.byte_offset + f.size_bytes as u64);
+        expect = Some(f.es_offset + f.es_size as u64);
     }
     assert_eq!(expect.unwrap(), idx.es_size);
 
@@ -85,4 +85,50 @@ fn indexes_h264_raw_es() {
     let idx = index("h264_prog.264");
     assert_h264_fixture_shape(&idx, "raw ES");
     assert_eq!(idx.frames[0].slice_count, 2, "x264 -slices 2");
+}
+
+/// Frame sizes and offsets describe the analyzed file: they must equal the
+/// packet sizes and positions ffprobe reports, whatever the ES cache adds
+/// for decoding (parameter sets in front of keyframes, start codes for
+/// length-prefixed samples).
+#[test]
+fn frame_sizes_and_offsets_match_ffprobe() {
+    for name in [
+        "h264_prog.mp4",
+        "h264_prog.264",
+        "h264_interlaced.264",
+        "h264.ts",
+        "h264_opengop.ts",
+        "hevc_8bit.mp4",
+        "hevc_8bit.265",
+        "hevc_10bit.mkv",
+    ] {
+        let out = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args(["-show_entries", "packet=size,pos", "-of", "csv=p=0"])
+            .arg(fixture(name))
+            .output()
+            .expect("ffprobe available");
+        assert!(out.status.success(), "ffprobe failed on {name}");
+        let expected: Vec<(u32, Option<u64>)> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                // MPEG-TS rows carry a trailing (side data) field.
+                let mut fields = l.split(',');
+                let size = fields.next().unwrap().parse().unwrap();
+                let pos = fields.next().and_then(|p| p.parse().ok());
+                (size, pos)
+            })
+            .collect();
+        let idx = Indexer::default().index(&fixture(name), |_| {}).unwrap().0;
+        let actual: Vec<(u32, Option<u64>)> = idx
+            .frames
+            .iter()
+            .map(|f| (f.size_bytes, f.file_offset))
+            .collect();
+        assert_eq!(actual, expected, "{name}");
+        std::fs::remove_file(&idx.es_cache_path).ok();
+    }
 }

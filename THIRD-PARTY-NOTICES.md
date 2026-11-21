@@ -8,8 +8,8 @@ third-party software:
 
 This software uses libraries from the FFmpeg project (libavformat,
 libavcodec, libavutil) under the LGPLv2.1. The build enables only the H.264
-decoder, the H.264/H.265 parsers, a few demuxers, the mp4toannexb bitstream
-filters and the file protocol; no GPL components are enabled. The sources are modified: the
+decoder, the H.264/H.265 parsers, a few demuxers and the file protocol; no
+GPL components are enabled. The sources are modified: the
 patches in `vendor/patches/ffmpeg/` add per-macroblock analysis export.
 License text: `licenses/LGPL-2.1.txt`. Source: <https://ffmpeg.org>, at the
 commit pinned in `vendor/build-decoders.sh`, plus the patches in this

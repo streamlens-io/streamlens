@@ -213,7 +213,12 @@ impl App {
             theme::kv("Slice QP", f.slice_qp.to_string()),
             theme::kv("Slices", f.slice_count.to_string()),
             theme::kv("Size", format!("{} B", f.size_bytes)),
-            theme::kv("Offset", format!("{:#x}", f.byte_offset)),
+            theme::kv(
+                "Offset",
+                f.file_offset
+                    .map(|o| format!("{o:#x}"))
+                    .unwrap_or_else(|| "—".into()),
+            ),
             theme::kv(
                 "PTS",
                 f.pts

@@ -6,8 +6,8 @@ it is, and in what order to read the code.
 ## The one-paragraph version
 
 Opening a file runs an **index pass**: libavformat demuxes any container,
-the `*_mp4toannexb` bitstream filters normalize the video track to Annex-B
-access units, and every AU is (a) appended to a flat **elementary-stream
+length-prefixed samples (MP4/MKV) are rewritten as Annex-B access units,
+and every AU is (a) appended to a flat **elementary-stream
 cache file** and (b) fed through a pure-Rust **syntax analyzer** that parses
 headers, computes POC, emulates the DPB and produces one compact
 `FrameRecord` per frame. From then on the container is irrelevant: byte
@@ -42,8 +42,11 @@ Dependency direction: `types ← syntax ← core ← app` and
 ## Data model (`crates/types`)
 
 - `FrameRecord` — one frame as the *indexer* sees it: decode/display index,
-  ES byte offset/size, type, keyframe flags, PTS/DTS, POC, slice QP,
-  reference lists. Kept small (streams can have 100k+ frames).
+  size and position in the analyzed file (`size_bytes`, `file_offset` —
+  what the UI shows, equal to ffprobe's packet size/pos), the AU's range in
+  the ES cache (`es_offset`, `es_size` — for decoding only), type, keyframe
+  flags, PTS/DTS, POC, slice QP, reference lists. Kept small (streams can
+  have 100k+ frames).
 - `FrameAnalysis` — one frame as the *decoder* sees it. Block storage is
   **arena-style**: flat `Vec<CodingUnit>`, `Vec<PredictionUnit>`,
   `Vec<TransformUnit>`, with superblocks/CUs holding index ranges
@@ -102,7 +105,10 @@ pinned upstream releases plus `vendor/patches/`:
 
 `Demuxer` (`demux.rs`) opens a file with libavformat, picks the first
 H.264/H.265 track and yields Annex-B access units with container
-timestamps and keyframe flags.
+timestamps, keyframe flags and the packet's size and position in the file.
+For MP4/MKV/FLV tracks, `annexb.rs` parses the avcC/hvcC record (its
+parameter sets go to the analyzer once, via `config_nals()`) and rewrites
+each length-prefixed sample with start codes.
 
 `Decoder` (`decode.rs`) is the decoder interface: `decode(au, tag, out)`
 and `finish(out)`. The tag (the decode index) rides through the decoder on

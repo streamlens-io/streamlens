@@ -2,6 +2,7 @@
 //! and the analysis decoders that expose per-block internals as
 //! [`streamlens_types::FrameAnalysis`].
 
+mod annexb;
 pub mod decode;
 pub mod demux;
 pub mod ffi;
@@ -19,6 +20,8 @@ pub enum Error {
     Decoder(String),
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
+    #[error("malformed stream: {0}")]
+    Malformed(String),
     #[error("no H.264/H.265 video stream found")]
     NoVideoStream,
     #[error("path is not representable for FFmpeg")]
