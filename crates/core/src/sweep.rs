@@ -107,16 +107,14 @@ fn sweep_thread(
             }
         };
 
-        // Bit sums from CU analysis (zeros when analysis is absent).
+        // Bit sums from CU analysis.
         let (mut bits_intra, mut bits_inter, mut bits_skip) = (0u64, 0u64, 0u64);
-        if let Some(analysis) = frame.analysis.as_deref() {
-            for cu in &analysis.cus {
-                let total = cu.bits.map(|b| b.total as u64).unwrap_or(0);
-                match cu.pred {
-                    PredMode::Intra | PredMode::Pcm => bits_intra += total,
-                    PredMode::Inter => bits_inter += total,
-                    PredMode::Skip | PredMode::Direct => bits_skip += total,
-                }
+        for cu in &frame.analysis.cus {
+            let total = cu.bits.map(|b| b.total as u64).unwrap_or(0);
+            match cu.pred {
+                PredMode::Intra | PredMode::Pcm => bits_intra += total,
+                PredMode::Inter => bits_inter += total,
+                PredMode::Skip | PredMode::Direct => bits_skip += total,
             }
         }
 

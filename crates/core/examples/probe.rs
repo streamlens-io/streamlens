@@ -22,14 +22,13 @@ fn main() {
     }
 
     let frame = session.frame(idx).expect("decode");
-    if let Some(a) = &frame.analysis {
-        let mut slices: Vec<u16> = a.superblocks.iter().map(|s| s.slice_index).collect();
-        slices.sort_unstable();
-        slices.dedup();
-        println!(
-            "analysis: {} superblocks, distinct slice indices {:?}",
-            a.superblocks.len(),
-            &slices[..slices.len().min(10)]
-        );
-    }
+    let a = &frame.analysis;
+    let mut slices: Vec<u16> = a.superblocks.iter().map(|s| s.slice_index).collect();
+    slices.sort_unstable();
+    slices.dedup();
+    println!(
+        "analysis: {} superblocks, distinct slice indices {:?}",
+        a.superblocks.len(),
+        &slices[..slices.len().min(10)]
+    );
 }

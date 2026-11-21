@@ -103,31 +103,30 @@ fn frame_bytes(f: &DecodedFrame) -> usize {
     use streamlens_types::{CodingUnit, PredictionUnit, SuperBlock, TransformUnit};
 
     let image: usize = f.image.planes.iter().map(Vec::len).sum();
-    let analysis = f.analysis.as_ref().map_or(0, |a| {
-        let planar = |p: &Option<streamlens_types::PlanarImage>| {
-            p.as_ref()
-                .map_or(0, |i| i.planes.iter().map(Vec::len).sum())
-        };
-        let signed = |p: &Option<streamlens_types::SignedImage>| {
-            p.as_ref()
-                .map_or(0, |i| i.planes.iter().map(|v| v.len() * 2).sum())
-        };
-        a.superblocks.len() * size_of::<SuperBlock>()
-            + a.cus.len() * size_of::<CodingUnit>()
-            + a.pus.len() * size_of::<PredictionUnit>()
-            + a.tus.len() * size_of::<TransformUnit>()
-            + planar(&a.stages.predicted)
-            + planar(&a.stages.unfiltered)
-            + signed(&a.stages.residual)
-            + signed(&a.stages.coefficients)
-    });
+    let a = &f.analysis;
+    let planar = |p: &Option<streamlens_types::PlanarImage>| {
+        p.as_ref()
+            .map_or(0, |i| i.planes.iter().map(Vec::len).sum())
+    };
+    let signed = |p: &Option<streamlens_types::SignedImage>| {
+        p.as_ref()
+            .map_or(0, |i| i.planes.iter().map(|v| v.len() * 2).sum())
+    };
+    let analysis = a.superblocks.len() * size_of::<SuperBlock>()
+        + a.cus.len() * size_of::<CodingUnit>()
+        + a.pus.len() * size_of::<PredictionUnit>()
+        + a.tus.len() * size_of::<TransformUnit>()
+        + planar(&a.stages.predicted)
+        + planar(&a.stages.unfiltered)
+        + signed(&a.stages.residual)
+        + signed(&a.stages.coefficients);
     image + analysis
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamlens_types::{PlanarImage, Subsampling};
+    use streamlens_types::{Codec, FrameAnalysis, PlanarImage, StagePlanes, Subsampling};
 
     fn frame(idx: u32, bytes: usize) -> DecodedFrame {
         DecodedFrame {
@@ -139,7 +138,18 @@ mod tests {
                 subsampling: Subsampling::Cs420,
                 planes: vec![vec![0; bytes]],
             },
-            analysis: None,
+            analysis: Arc::new(FrameAnalysis {
+                codec: Codec::H264,
+                width: 0,
+                height: 0,
+                superblock_size: 16,
+                poc: 0,
+                superblocks: Vec::new(),
+                cus: Vec::new(),
+                pus: Vec::new(),
+                tus: Vec::new(),
+                stages: StagePlanes::default(),
+            }),
         }
     }
 

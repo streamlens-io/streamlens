@@ -24,10 +24,9 @@ impl App {
                 &self.header_expanded,
                 &self.header_filter,
             ),
-            (Some(index), Tab::Stats) => panels::stats_view(
-                index,
-                self.frame.as_ref().and_then(|f| f.analysis.as_deref()),
-            ),
+            (Some(index), Tab::Stats) => {
+                panels::stats_view(index, self.frame.as_ref().map(|f| &*f.analysis))
+            }
         };
         column![bar, body].into()
     }
@@ -35,10 +34,7 @@ impl App {
     pub(super) fn video_pane(&self) -> Element<'_, Message> {
         // Stage planes are captured lazily: clicking a stage tab enables
         // capture and re-decodes. 8-bit only (decoder patch limitation).
-        let obtainable = self
-            .frame
-            .as_ref()
-            .is_some_and(|f| f.analysis.is_some() && f.image.bit_depth == 8);
+        let obtainable = self.frame.as_ref().is_some_and(|f| f.image.bit_depth == 8);
         let available = |stage: Stage| stage == Stage::Decoded || obtainable;
         let mut stage_tabs = row![].spacing(2).padding(2);
         for stage in Stage::ALL {
@@ -49,7 +45,7 @@ impl App {
                     Message::SetStage(stage),
                 ));
             } else {
-                // Unavailable (no analysis / >8-bit): dimmed, no action.
+                // Unavailable (no frame / >8-bit): dimmed, no action.
                 stage_tabs = stage_tabs.push(
                     button(text(stage.label()).size(12))
                         .padding([3, 8])
@@ -108,7 +104,7 @@ impl App {
     /// everything known about it below (follows hover).
     pub(super) fn block_pane(&self) -> Element<'_, Message> {
         let pixel = self.hovered_pixel.or(self.selected_pixel);
-        let analysis = self.frame.as_ref().and_then(|f| f.analysis.as_deref());
+        let analysis = self.frame.as_ref().map(|f| &*f.analysis);
         column![
             self.block_magnifier(pixel),
             panels::block_view(analysis, pixel)
@@ -117,18 +113,13 @@ impl App {
     }
 
     /// The magnifier on top of the Block Info pane. Zooms to the coding unit
-    /// under the cursor; without analysis it just magnifies around the
-    /// cursor and claims no block geometry.
+    /// under the cursor; outside any coding unit it just magnifies around
+    /// the cursor.
     fn block_magnifier(&self, pixel: Option<(u16, u16)>) -> Element<'_, Message> {
-        let (Some((x, y)), Some(_)) = (pixel, self.frame.as_ref()) else {
+        let (Some((x, y)), Some(frame)) = (pixel, self.frame.as_ref()) else {
             return column![].height(0).into();
         };
-        let rect = self
-            .frame
-            .as_ref()
-            .and_then(|f| f.analysis.as_ref())
-            .and_then(|a| a.cu_at(x, y))
-            .map(|cu| cu.rect);
+        let rect = frame.analysis.cu_at(x, y).map(|cu| cu.rect);
         const PANE: f32 = 200.0;
         let (caption, zoom, center) = match rect {
             Some(r) => (
@@ -163,19 +154,13 @@ impl App {
         .into()
     }
 
-    /// Block coordinates for a pixel: (unit name, col, row). H.264 MBs are
-    /// always 16×16; H.265 CTU size comes from the frame analysis — without
-    /// it we show no block coordinate rather than guess.
+    /// Block coordinates for a pixel: (unit name, col, row) — 16×16 MBs
+    /// for H.264, the CTU size from the frame analysis for H.265.
     fn block_coords(&self, x: u16, y: u16) -> Option<(&'static str, u32, u32)> {
-        if let Some(a) = self.frame.as_ref().and_then(|f| f.analysis.as_deref()) {
-            let unit = if a.superblock_size == 16 { "MB" } else { "CTU" };
-            let s = a.superblock_size.max(1);
-            return Some((unit, x as u32 / s, y as u32 / s));
-        }
-        match self.index.as_ref().map(|i| i.codec) {
-            Some(streamlens_types::Codec::H264) => Some(("MB", x as u32 / 16, y as u32 / 16)),
-            _ => None,
-        }
+        let a = &self.frame.as_ref()?.analysis;
+        let unit = if a.superblock_size == 16 { "MB" } else { "CTU" };
+        let s = a.superblock_size.max(1);
+        Some((unit, x as u32 / s, y as u32 / s))
     }
 
     fn info_pane(&self) -> Element<'_, Message> {

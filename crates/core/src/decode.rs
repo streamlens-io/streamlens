@@ -31,7 +31,7 @@ use crate::Error;
 pub struct DecodedFrame {
     pub decode_index: u32,
     pub image: PlanarImage,
-    pub analysis: Option<Arc<FrameAnalysis>>,
+    pub analysis: Arc<FrameAnalysis>,
 }
 
 /// Decodes frames on demand from a [`StreamIndex`]'s ES cache.
@@ -335,7 +335,7 @@ fn run_decoder(
             let frame = DecodedFrame {
                 decode_index: p.tag,
                 image: p.image,
-                analysis: Some(Arc::new(p.analysis)),
+                analysis: Arc::new(p.analysis),
             };
             if output.send(Output::Frame(frame)).is_err() {
                 return;

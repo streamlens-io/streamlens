@@ -141,9 +141,9 @@ pub enum Subsampling {
     Cs444,
 }
 
-/// A planar YUV image owned by the analysis layer (no GStreamer types leak
-/// past the gst crate). Samples are u8 for 8-bit, little-endian u16 pairs for
-/// >8-bit.
+/// A planar YUV image owned by the analysis layer (no decoder types leak
+/// past the media crate). Samples are u8 for 8-bit, little-endian u16 pairs
+/// for >8-bit.
 #[derive(Debug, Clone)]
 pub struct PlanarImage {
     pub width: u32,

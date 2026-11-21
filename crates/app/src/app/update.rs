@@ -475,8 +475,8 @@ impl App {
     fn rebuild_segments(&mut self) {
         let mut segments = Vec::new();
         let mut glyphs = Vec::new();
-        if let Some(analysis) = self.frame.as_ref().and_then(|f| f.analysis.as_deref()) {
-            overlays::build_segments(analysis, &self.overlays, &mut segments, &mut glyphs);
+        if let Some(frame) = &self.frame {
+            overlays::build_segments(&frame.analysis, &self.overlays, &mut segments, &mut glyphs);
         }
         self.segments = Arc::new(segments);
         self.glyphs = Arc::new(glyphs);
@@ -493,8 +493,8 @@ impl App {
         let frame = self.frame.as_ref()?;
         match self.stage {
             Stage::Decoded => Some(&frame.image),
-            Stage::Predicted => frame.analysis.as_ref()?.stages.predicted.as_ref(),
-            Stage::Unfiltered => frame.analysis.as_ref()?.stages.unfiltered.as_ref(),
+            Stage::Predicted => frame.analysis.stages.predicted.as_ref(),
+            Stage::Unfiltered => frame.analysis.stages.unfiltered.as_ref(),
             Stage::Residual => None, // converted in rebuild_stage_image
         }
     }
@@ -511,8 +511,9 @@ impl App {
             Stage::Predicted | Stage::Unfiltered => self.current_stage_planar().cloned(),
             Stage::Residual => frame
                 .analysis
+                .stages
+                .residual
                 .as_ref()
-                .and_then(|a| a.stages.residual.as_ref())
                 .map(|r| crate::stages::residual_to_planar(r, frame.image.bit_depth)),
         };
 

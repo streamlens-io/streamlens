@@ -211,7 +211,7 @@ pub fn block_view<'a>(
     pixel: Option<(u16, u16)>,
 ) -> Element<'a, Message> {
     let Some(a) = analysis else {
-        return container(text("no per-block analysis for this frame").size(12))
+        return container(text("no frame decoded yet").size(12))
             .padding(10)
             .into();
     };
@@ -539,9 +539,6 @@ pub fn stats_view<'a>(
             ));
             col = col.push(stat_row(1, "zero vectors", zero_mvs.to_string(), None));
         }
-    } else {
-        col = col.push(text("").size(6));
-        col = col.push(text("per-block stats need the analysis decoders").size(11));
     }
 
     scrollable(col.padding(10)).width(Fill).height(Fill).into()

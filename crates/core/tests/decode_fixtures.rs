@@ -74,7 +74,7 @@ fn decoded_pixels_match_ffmpeg_reference() {
 fn analysis_meta_flows_through_session_h264() {
     let mut session = Session::open(&fixture("h264_prog.264"), |_| {}).unwrap();
     let f0 = session.frame(0).unwrap();
-    let a = f0.analysis.as_deref().expect("slh264dec attaches analysis");
+    let a = &*f0.analysis;
     assert_eq!(a.superblock_size, 16);
     assert_eq!(a.superblocks.len(), 20 * 15);
     assert!(a
@@ -85,7 +85,7 @@ fn analysis_meta_flows_through_session_h264() {
 
     // Inter frame has MVs.
     let f3 = session.frame(3).unwrap();
-    let a3 = f3.analysis.as_deref().unwrap();
+    let a3 = &*f3.analysis;
     let mvs = a3
         .pus
         .iter()
@@ -181,7 +181,7 @@ fn hevc_end_to_end() {
 
     let f0 = session.frame(0).unwrap();
     assert_eq!(f0.image.width, 320);
-    let a = f0.analysis.as_deref().expect("slh265dec attaches analysis");
+    let a = &*f0.analysis;
     assert!(a.superblock_size >= 16);
     // CU rects tile the picture.
     let area: u64 = a
