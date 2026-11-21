@@ -11,7 +11,7 @@ thiserror = { workspace = true }
 libc = "0.2"
 
 [build-dependencies]
-bindgen = "0.71"
+bindgen = "0.73"
 
 [lib]
 # bindgen-generated doc comments are not valid doctests
