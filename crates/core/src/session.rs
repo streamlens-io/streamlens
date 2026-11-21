@@ -7,6 +7,7 @@ use crate::cache::{CacheWindow, FrameCache};
 use crate::decode::{DecodeService, DecodedFrame};
 use crate::index::{IndexProgress, StreamIndex};
 use crate::indexer::Indexer;
+use crate::source::AuReader;
 use crate::Error;
 
 /// Estimated bytes of one decoded frame of this stream: the planes plus
@@ -25,8 +26,9 @@ pub struct Session {
     pub index: Arc<StreamIndex>,
     decode: DecodeService,
     cache: FrameCache,
-    /// ES cache handle for byte reads (header re-parses).
-    es_file: std::fs::File,
+    /// Reader for header re-parses, opened on first use (separate from the
+    /// decoder's, which stays positioned for playback).
+    headers_reader: Option<AuReader>,
     /// Analyzer with final parameter-set state, for Headers-panel re-parses.
     analyzer: Box<dyn streamlens_syntax::AuAnalyzer>,
 }
@@ -35,26 +37,29 @@ impl Session {
     /// Indexes `path` and prepares decoding. Blocking; run on a worker
     /// thread and forward `progress` to the UI.
     pub fn open(path: &Path, progress: impl FnMut(IndexProgress)) -> Result<Self, Error> {
-        let (index, analyzer) = Indexer::default().index(path, progress)?;
-        let decode = DecodeService::new(&index)?;
-        let es_file = std::fs::File::open(&index.es_cache_path)?;
+        let (index, analyzer) = Indexer.index(path, progress)?;
+        let index = Arc::new(index);
         Ok(Self {
-            index: Arc::new(index),
-            decode,
+            decode: DecodeService::new(index.clone()),
+            index,
             cache: FrameCache::new(CacheWindow::default()),
-            es_file,
+            headers_reader: None,
             analyzer,
         })
     }
 
     /// Field-level syntax trees of every NAL in the given frame's AU.
     pub fn headers(
-        &self,
+        &mut self,
         decode_index: u32,
     ) -> Result<Vec<streamlens_syntax::analyzer::RecordedNal>, Error> {
-        let f = &self.index.frames[decode_index as usize];
-        let au = self.es_bytes(f.es_offset, f.es_size as usize)?;
-        Ok(self.analyzer.record_au(&au))
+        if self.headers_reader.is_none() {
+            self.headers_reader = Some(AuReader::open(self.index.clone())?);
+        }
+        let reader = self.headers_reader.as_mut().expect("opened above");
+        reader.seek(decode_index)?;
+        let au = reader.next_au()?;
+        Ok(self.analyzer.record_au(&au.data))
     }
 
     /// Returns the decoded frame at `decode_index`. On a miss the streaming
@@ -75,7 +80,7 @@ impl Session {
         if let Some(f) = self.cache.get(decode_index) {
             return Ok(f);
         }
-        for frame in self.decode.decode_to(&self.index, decode_index)? {
+        for frame in self.decode.decode_to(decode_index)? {
             self.cache.insert(frame);
         }
         self.cache
@@ -102,7 +107,7 @@ impl Session {
         if self.cache.contains(decode_index) {
             return Ok(true);
         }
-        let (frames, done) = self.decode.pump(&self.index, decode_index, Some(budget))?;
+        let (frames, done) = self.decode.pump(decode_index, Some(budget))?;
         for frame in frames {
             self.cache.insert(frame);
         }
@@ -130,20 +135,5 @@ impl Session {
 
     pub fn set_window(&mut self, window: CacheWindow) {
         self.cache.set_window(window);
-    }
-
-    /// Reads raw bytes from the elementary-stream cache (hex viewer),
-    /// truncated to the stream end.
-    pub fn es_bytes(&self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
-        let avail = self.index.es_size.saturating_sub(offset) as usize;
-        let mut buf = vec![0u8; len.min(avail)];
-        crate::read_exact_at(&self.es_file, &mut buf, offset)?;
-        Ok(buf)
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        std::fs::remove_file(&self.index.es_cache_path).ok();
     }
 }

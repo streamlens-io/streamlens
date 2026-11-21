@@ -1,7 +1,9 @@
 //! The stream index: everything known about every frame after the index
-//! pass, plus the normalized elementary-stream cache it was built from.
+//! pass, and what it takes to read each frame back from the file.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use streamlens_syntax::diag::Diagnostics;
 use streamlens_syntax::AuSummary;
@@ -15,14 +17,18 @@ pub struct IndexProgress {
     pub fraction: Option<f32>,
 }
 
+/// Parameter sets to insert into a keyframe that has none in-band, at
+/// byte offset `at` of its Annex B access unit.
+#[derive(Debug, Clone)]
+pub struct ParamInsertion {
+    pub at: u32,
+    pub bytes: Arc<[u8]>,
+}
+
 /// Result of indexing one video stream.
 ///
-/// `es_offset`/`es_size` in each [`FrameRecord`] address the **normalized
-/// elementary stream** written to `es_cache_path` (Annex B, one AU after
-/// another, parameter sets in front of keyframes). NAL offsets, header
-/// re-parses and the decode service address that file, independent of the
-/// original container; `size_bytes`/`file_offset` describe the frame in the
-/// analyzed file.
+/// NAL offsets in `analysis` are relative to each frame's Annex B access
+/// unit as [`crate::source::AuReader`] produces it (insertions applied).
 #[derive(Debug)]
 pub struct StreamIndex {
     pub codec: Codec,
@@ -41,9 +47,14 @@ pub struct StreamIndex {
     /// the panel doesn't rescan every frame record per redraw).
     pub stats: StreamStats,
     pub diagnostics: Diagnostics,
-    pub es_cache_path: PathBuf,
-    /// Total size of the normalized elementary stream in bytes.
-    pub es_size: u64,
+    /// The analyzed file; decoding reads the frames back from it.
+    pub path: PathBuf,
+    /// Total size of the video track's frames in the file.
+    pub video_bytes: u64,
+    /// Keyframes that get parameter sets inserted (decode index → what).
+    pub insertions: HashMap<u32, ParamInsertion>,
+    /// (file offset, size) of each frame's packet → decode index.
+    pub(crate) packet_frames: HashMap<(u64, u32), u32>,
 }
 
 /// Whole-stream aggregates shown in the Stats panel.
@@ -58,6 +69,11 @@ pub struct StreamStats {
 }
 
 impl StreamIndex {
+    /// The frame whose packet sits at `file_offset` with `size` bytes.
+    pub(crate) fn frame_at(&self, file_offset: Option<u64>, size: u32) -> Option<u32> {
+        self.packet_frames.get(&(file_offset?, size)).copied()
+    }
+
     /// Decode-order index of the closest random access point at or before
     /// `decode_index`.
     pub fn keyframe_before(&self, decode_index: u32) -> u32 {

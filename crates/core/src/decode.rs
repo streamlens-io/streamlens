@@ -1,4 +1,4 @@
-//! On-demand decoding from the elementary-stream cache.
+//! On-demand decoding, reading the frames back from the analyzed file.
 //!
 //! The analysis decoder runs on its own thread and is fed incrementally —
 //! across GOP boundaries too (decoders take mid-stream keyframes in stride),
@@ -6,24 +6,23 @@
 //! re-initialization, and decoding continues between calls. Feeding stays
 //! within a bounded window ahead of the requested frame; the decoder is
 //! restarted only for real seeks (backwards, or forward past the next
-//! keyframe). No container seeking — the index pass already flattened
-//! everything to byte offsets.
+//! keyframe), which seek the file to the start keyframe.
 //!
 //! Every access unit carries its decode index through the decoder, so each
 //! picture is labelled exactly; a picture the decoder drops is just
 //! missing, it never shifts the labels of the pictures after it.
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use streamlens_media::{Decoder, Picture};
 use streamlens_types::{Codec, FrameAnalysis, PlanarImage};
 
 use crate::index::StreamIndex;
+use crate::source::AuReader;
 use crate::Error;
 
 /// One decoded frame with its per-block analysis.
@@ -34,9 +33,12 @@ pub struct DecodedFrame {
     pub analysis: Arc<FrameAnalysis>,
 }
 
-/// Decodes frames on demand from a [`StreamIndex`]'s ES cache.
+/// Decodes frames of an indexed stream on demand.
 pub struct DecodeService {
-    es_file: File,
+    index: Arc<StreamIndex>,
+    /// Kept open across decoder restarts (opening probes the file); the
+    /// decoder thread holds it while it runs.
+    reader: Arc<Mutex<Option<AuReader>>>,
     codec: Codec,
     /// Capture reconstruction-stage planes (costly; only when a stage view
     /// is open).
@@ -50,7 +52,8 @@ pub struct DecodeService {
 pub(crate) const REORDER_AHEAD: u32 = 48;
 
 enum Input {
-    Au { tag: u32, data: Vec<u8> },
+    /// Decode every access unit up to and including this decode index.
+    Feed(u32),
     Finish,
 }
 
@@ -70,7 +73,7 @@ struct LiveDecoder {
     cancel: Arc<AtomicBool>,
     /// Keyframe decoding started at — the earliest frame it can emit.
     start: u32,
-    /// Next decode index to feed.
+    /// Next decode index not yet requested from the decoder thread.
     fed: u32,
     /// Access units the decoder has processed.
     consumed: u32,
@@ -140,13 +143,14 @@ impl LiveDecoder {
 }
 
 impl DecodeService {
-    pub fn new(index: &StreamIndex) -> Result<Self, Error> {
-        Ok(Self {
-            es_file: File::open(&index.es_cache_path)?,
+    pub fn new(index: Arc<StreamIndex>) -> Self {
+        Self {
             codec: index.codec,
+            index,
+            reader: Arc::new(Mutex::new(None)),
             stages: false,
             live: None,
-        })
+        }
     }
 
     /// Toggles stage-plane capture; drops the live decoder so the next
@@ -166,12 +170,8 @@ impl DecodeService {
     /// emitted frame (the caller caches them). Cheap when stepping forward
     /// or playing: one or two access units per call, no decoder restarts
     /// across GOP boundaries.
-    pub fn decode_to(
-        &mut self,
-        index: &StreamIndex,
-        target: u32,
-    ) -> Result<Vec<DecodedFrame>, Error> {
-        let (frames, done) = self.pump(index, target, None)?;
+    pub fn decode_to(&mut self, target: u32) -> Result<Vec<DecodedFrame>, Error> {
+        let (frames, done) = self.pump(target, None)?;
         debug_assert!(done, "unbudgeted pump completes or errors");
         Ok(frames)
     }
@@ -184,10 +184,11 @@ impl DecodeService {
     /// caller. `None` = run until the target is out or known to be missing.
     pub fn pump(
         &mut self,
-        index: &StreamIndex,
         target: u32,
         budget: Option<Duration>,
     ) -> Result<(Vec<DecodedFrame>, bool), Error> {
+        let index = self.index.clone();
+        let index = &*index;
         if !self
             .live
             .as_ref()
@@ -228,21 +229,10 @@ impl DecodeService {
         loop {
             // Feed within a bounded window past the target (reorder delay);
             // beyond that, wait for output instead of racing ahead.
-            while !live.finish_sent
-                && live.fed < n
-                && live.fed <= target.saturating_add(REORDER_AHEAD)
-            {
-                let rec = &index.frames[live.fed as usize];
-                let mut data = vec![0u8; rec.es_size as usize];
-                crate::read_exact_at(&self.es_file, &mut data, rec.es_offset)?;
-                send(
-                    &live.input,
-                    Input::Au {
-                        tag: live.fed,
-                        data,
-                    },
-                )?;
-                live.fed += 1;
+            let until = target.saturating_add(REORDER_AHEAD).min(n - 1);
+            if !live.finish_sent && live.fed <= until {
+                send(&live.input, Input::Feed(until))?;
+                live.fed = until + 1;
             }
             // Out of input — the stream ended, or the whole window went
             // through the decoder without the target: drain the held-back
@@ -289,10 +279,16 @@ impl DecodeService {
         let (input, input_rx) = mpsc::channel();
         let (output_tx, output) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let thread_cancel = cancel.clone();
+        let thread = DecoderThread {
+            decoder,
+            reader: self.reader.clone(),
+            index: self.index.clone(),
+            start: keyframe,
+            cancel: cancel.clone(),
+        };
         std::thread::Builder::new()
             .name("streamlens-decode".into())
-            .spawn(move || run_decoder(decoder, input_rx, output_tx, thread_cancel))?;
+            .spawn(move || thread.run(input_rx, output_tx))?;
         Ok(LiveDecoder {
             input,
             output,
@@ -314,43 +310,92 @@ fn send(input: &mpsc::Sender<Input>, msg: Input) -> Result<(), Error> {
         .map_err(|_| Error::Pipeline("decoder thread exited".into()))
 }
 
-/// Decoder thread: decodes queued access units in order and reports every
-/// picture, then an acknowledgement per access unit.
-fn run_decoder(
-    mut decoder: Box<dyn Decoder>,
-    input: mpsc::Receiver<Input>,
-    output: mpsc::Sender<Output>,
+struct DecoderThread {
+    decoder: Box<dyn Decoder>,
+    reader: Arc<Mutex<Option<AuReader>>>,
+    index: Arc<StreamIndex>,
+    start: u32,
     cancel: Arc<AtomicBool>,
-) {
-    let mut pictures: Vec<Picture> = Vec::new();
-    while let Ok(msg) = input.recv() {
-        if cancel.load(Ordering::Relaxed) {
+}
+
+impl DecoderThread {
+    /// Reads and decodes access units in order as far as requested, and
+    /// reports every picture, then an acknowledgement per access unit.
+    fn run(mut self, input: mpsc::Receiver<Input>, output: mpsc::Sender<Output>) {
+        // A cancelled predecessor releases the reader at its next AU.
+        let reader = self.reader.clone();
+        let mut guard = reader.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = self.position(&mut guard) {
+            let _ = output.send(Output::Failed(e.to_string()));
             return;
         }
-        let (result, done) = match msg {
-            Input::Au { tag, data } => (decoder.decode(&data, tag, &mut pictures), false),
-            Input::Finish => (decoder.finish(&mut pictures), true),
-        };
-        for p in pictures.drain(..) {
-            let frame = DecodedFrame {
+        let reader = guard.as_mut().expect("positioned reader");
+        let mut pictures: Vec<Picture> = Vec::new();
+        let mut next = self.start;
+        while let Ok(msg) = input.recv() {
+            match msg {
+                Input::Feed(until) => {
+                    while next <= until {
+                        if self.cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let result = reader.next_au().map_err(|e| e.to_string()).and_then(|au| {
+                            let data = if au.carry.is_empty() {
+                                au.data
+                            } else {
+                                [au.carry, au.data].concat()
+                            };
+                            self.decoder
+                                .decode(&data, au.index, &mut pictures)
+                                .map_err(|e| e.to_string())
+                        });
+                        if !send_pictures(&output, &mut pictures) {
+                            return;
+                        }
+                        let status = match result {
+                            Ok(()) => Output::Consumed,
+                            Err(e) => Output::Failed(e),
+                        };
+                        let failed = matches!(status, Output::Failed(_));
+                        if output.send(status).is_err() || failed {
+                            return;
+                        }
+                        next += 1;
+                    }
+                }
+                Input::Finish => {
+                    let result = self.decoder.finish(&mut pictures);
+                    if send_pictures(&output, &mut pictures) {
+                        let _ = output.send(match result {
+                            Ok(()) => Output::Finished,
+                            Err(e) => Output::Failed(e.to_string()),
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn position(&self, reader: &mut Option<AuReader>) -> Result<(), Error> {
+        if reader.is_none() {
+            *reader = Some(AuReader::open(self.index.clone())?);
+        }
+        reader.as_mut().expect("opened above").seek(self.start)
+    }
+}
+
+/// Sends the pictures as frames; false when the receiver is gone.
+fn send_pictures(output: &mpsc::Sender<Output>, pictures: &mut Vec<Picture>) -> bool {
+    pictures.drain(..).all(|p| {
+        output
+            .send(Output::Frame(DecodedFrame {
                 decode_index: p.tag,
                 image: p.image,
                 analysis: Arc::new(p.analysis),
-            };
-            if output.send(Output::Frame(frame)).is_err() {
-                return;
-            }
-        }
-        let status = match result {
-            Err(e) => Output::Failed(e.to_string()),
-            Ok(()) if done => Output::Finished,
-            Ok(()) => Output::Consumed,
-        };
-        let stop = !matches!(status, Output::Consumed);
-        if output.send(status).is_err() || stop {
-            return;
-        }
-    }
+            }))
+            .is_ok()
+    })
 }
 
 /// Keyframe to start a fresh decoder at for `target`. Leading (RASL)

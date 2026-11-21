@@ -138,6 +138,29 @@ impl Demuxer {
             .map_or(&[][..], |l| &l.config_nals)
     }
 
+    /// Repositions so that reading continues at or before the packet at
+    /// `file_offset`: by timestamp (the packet's DTS or PTS, in ns) when
+    /// there is one, else by byte position. Seeks land on a random access
+    /// point at or before the target; the caller reads forward from there.
+    pub fn seek(&mut self, ts_ns: Option<i64>, file_offset: u64) -> Result<(), Error> {
+        // SAFETY: the format context is valid; seeking only moves it.
+        let ret = unsafe {
+            match ts_ns {
+                Some(ns) => {
+                    // Rounded down so a backward seek cannot land past the
+                    // target.
+                    let tb = self.time_base;
+                    let ts = (ns as i128 * tb.den as i128)
+                        .div_euclid(tb.num.max(1) as i128 * 1_000_000_000)
+                        as i64;
+                    av_seek_frame(self.fmt, self.stream, ts, AVSEEK_FLAG_BACKWARD as i32)
+                }
+                None => av_seek_frame(self.fmt, -1, file_offset as i64, AVSEEK_FLAG_BYTE as i32),
+            }
+        };
+        check("av_seek_frame", ret)
+    }
+
     /// Next access unit in decode order; `None` at the end of the stream.
     pub fn read(&mut self) -> Result<Option<AccessUnit<'_>>, Error> {
         // SAFETY: the contexts were initialized in `open` and are only used

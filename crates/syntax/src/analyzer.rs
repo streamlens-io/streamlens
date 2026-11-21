@@ -64,10 +64,11 @@ pub trait AuAnalyzer: Send {
     }
 
     /// Makes a keyframe AU decodable on its own: when it lacks in-band
-    /// parameter sets, returns the AU with every parameter set seen so far
-    /// inserted (after a leading access unit delimiter) and updates
-    /// `summary.nals` to the new layout. `None` when the AU needs no change.
-    fn insert_parameter_sets(&self, au: &[u8], summary: &mut AuSummary) -> Option<Vec<u8>>;
+    /// parameter sets, returns every parameter set seen so far and where to
+    /// insert them (after a leading access unit delimiter), and updates
+    /// `summary.nals` to the AU as it reads with them inserted. `None` when
+    /// the AU needs no change.
+    fn parameter_sets_to_insert(&self, au: &[u8], summary: &mut AuSummary) -> Option<Insertion>;
 
     /// Re-parses one AU with field recording for the Headers panel, using
     /// the current parameter-set state. Bit offsets in the trees are
@@ -117,7 +118,7 @@ impl ParameterSetStore {
         self.nals.insert((raw_type, id), nal.to_vec());
     }
 
-    /// See [`AuAnalyzer::insert_parameter_sets`]. `required` lists the
+    /// See [`AuAnalyzer::parameter_sets_to_insert`]. `required` lists the
     /// parameter-set NAL types a standalone keyframe needs; `describe`
     /// gives the name and VCL flag of a NAL type.
     pub fn splice(
@@ -127,7 +128,7 @@ impl ParameterSetStore {
         required: &[u8],
         aud_type: u8,
         describe: impl Fn(u8) -> (&'static str, bool),
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Insertion> {
         if !summary.is_keyframe
             || self.nals.is_empty()
             || required
@@ -164,11 +165,30 @@ impl ParameterSetStore {
             n.offset += block.len();
         }
         summary.nals.splice(split..split, inserted);
-
-        let mut out = Vec::with_capacity(au.len() + block.len());
-        out.extend_from_slice(&au[..at]);
-        out.extend_from_slice(&block);
-        out.extend_from_slice(&au[at..]);
-        Some(out)
+        Some(Insertion { at, bytes: block })
     }
+}
+
+/// Bytes to insert into an access unit at byte offset `at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Insertion {
+    pub at: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl Insertion {
+    /// `au` with the bytes inserted.
+    pub fn apply(&self, au: &[u8]) -> Vec<u8> {
+        splice_at(au, self.at, &self.bytes)
+    }
+}
+
+/// `au` with `bytes` inserted at `at` (clamped to the AU length).
+pub fn splice_at(au: &[u8], at: usize, bytes: &[u8]) -> Vec<u8> {
+    let at = at.min(au.len());
+    let mut out = Vec::with_capacity(au.len() + bytes.len());
+    out.extend_from_slice(&au[..at]);
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(&au[at..]);
+    out
 }

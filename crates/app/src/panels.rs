@@ -65,13 +65,8 @@ pub fn stream_view<'a>(index: &'a StreamIndex, current: u32) -> Element<'a, Mess
         let au = &index.analysis[i as usize];
         let marker = if i == current { "▶" } else { " " };
         let head = format!(
-            "{marker} AU {i} — {:?} POC {} — {} B{}",
-            f.frame_type,
-            f.poc,
-            f.size_bytes,
-            f.file_offset
-                .map(|o| format!(" @ {o:#x}"))
-                .unwrap_or_default()
+            "{marker} AU {i} — {:?} POC {} — {} B @ {:#x}",
+            f.frame_type, f.poc, f.size_bytes, f.file_offset
         );
         col = col.push(nav_row_colored(
             head,
@@ -455,7 +450,7 @@ pub fn stats_view<'a>(
         .info
         .duration_ns
         .filter(|&d| d > 0)
-        .map(|d| (index.es_size * 8) as f64 / (d as f64 / 1e9));
+        .map(|d| (index.video_bytes * 8) as f64 / (d as f64 / 1e9));
     if let Some(bps) = bitrate {
         col = col.push(stat_row(
             1,

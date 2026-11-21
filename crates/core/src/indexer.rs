@@ -1,10 +1,11 @@
 //! The indexing pass: demux + parse the whole file once, feed every access
-//! unit through the syntax analyzer, write the normalized elementary stream
-//! to a cache file, and assemble the [`StreamIndex`].
+//! unit through the syntax analyzer, and assemble the [`StreamIndex`]. The
+//! video is not copied: decoding reads it back from the file (see
+//! [`crate::source`]).
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 use streamlens_media::Demuxer;
 use streamlens_syntax::diag::Diagnostics;
@@ -13,23 +14,12 @@ use streamlens_syntax::h265::H265Analyzer;
 use streamlens_syntax::{AuAnalyzer, AuSummary};
 use streamlens_types::{Codec, FrameRecord, StreamInfo};
 
-use crate::index::{IndexProgress, StreamIndex};
+use crate::index::{IndexProgress, ParamInsertion, StreamIndex};
 use crate::Error;
 
 /// Indexes a media file. Blocking; run on a worker thread.
-pub struct Indexer {
-    /// Directory for the elementary-stream cache (defaults to the system
-    /// temp dir).
-    pub cache_dir: PathBuf,
-}
-
-impl Default for Indexer {
-    fn default() -> Self {
-        Self {
-            cache_dir: std::env::temp_dir(),
-        }
-    }
-}
+#[derive(Default)]
+pub struct Indexer;
 
 impl Indexer {
     /// Runs the index pass. `progress` is called from the indexing thread
@@ -49,39 +39,24 @@ impl Indexer {
         let codec = demuxer.codec();
         let mut analyzer = make_analyzer(codec);
 
-        let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "stream".into());
-        // pid + counter: several sessions (or parallel tests) may index
-        // files with the same stem concurrently.
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let es_cache_path = self
-            .cache_dir
-            .join(format!("streamlens-{stem}-{}-{seq}.es", std::process::id()));
-        let result = index_into(
-            &mut demuxer,
-            analyzer.as_mut(),
-            &es_cache_path,
-            &mut progress,
-        );
-        let (mut frames, analysis, diags, es_size) = match result {
-            Ok(r) if !r.0.is_empty() => r,
+        let mut pass = IndexPass::default();
+        pass.run(&mut demuxer, analyzer.as_mut(), &mut progress)?;
+        if pass.frames.is_empty() {
             // Everything downstream assumes at least one frame
             // (frames.len()-1 arithmetic, keyframe lookups).
-            Ok(_) => {
-                std::fs::remove_file(&es_cache_path).ok();
-                return Err(Error::Pipeline(format!(
-                    "no decodable video frames found in {}",
-                    path.display()
-                )));
-            }
-            Err(e) => {
-                std::fs::remove_file(&es_cache_path).ok();
-                return Err(e);
-            }
-        };
+            return Err(Error::Pipeline(format!(
+                "no decodable video frames found in {}",
+                path.display()
+            )));
+        }
+        let IndexPass {
+            mut frames,
+            analysis,
+            diags,
+            insertions,
+            packet_frames,
+        } = pass;
+
         let display_to_decode = assign_display_order(&mut frames);
         let props = analyzer.stream_props().unwrap_or_default();
         let info = stream_info(codec, &frames, props, path);
@@ -89,6 +64,7 @@ impl Indexer {
             (lo.min(f.slice_qp), hi.max(f.slice_qp))
         });
         let stats = stream_stats(&frames);
+        let video_bytes = frames.iter().map(|f| f.size_bytes as u64).sum();
 
         Ok((
             StreamIndex {
@@ -100,87 +76,109 @@ impl Indexer {
                 qp_range,
                 stats,
                 diagnostics: diags,
-                es_cache_path,
-                es_size,
+                path: path.to_path_buf(),
+                video_bytes,
+                insertions,
+                packet_frames,
             },
             analyzer,
         ))
     }
 }
 
-type Indexed = (Vec<FrameRecord>, Vec<AuSummary>, Diagnostics, u64);
+#[derive(Default)]
+struct IndexPass {
+    frames: Vec<FrameRecord>,
+    analysis: Vec<AuSummary>,
+    diags: Diagnostics,
+    insertions: HashMap<u32, ParamInsertion>,
+    packet_frames: HashMap<(u64, u32), u32>,
+}
 
-/// Demuxes every access unit into the ES cache file and the frame list.
-/// Keyframes get their parameter sets inserted when they lack them, so any
-/// keyframe-aligned byte range of the cache decodes standalone.
-fn index_into(
-    demuxer: &mut Demuxer,
-    analyzer: &mut dyn AuAnalyzer,
-    es_cache_path: &Path,
-    progress: &mut impl FnMut(IndexProgress),
-) -> Result<Indexed, Error> {
-    let mut es_writer = BufWriter::new(File::create(es_cache_path)?);
-    let mut diags = Diagnostics::default();
-    let mut frames: Vec<FrameRecord> = Vec::new();
-    let mut analysis: Vec<AuSummary> = Vec::new();
-    let mut es_offset = 0u64;
-
-    // MP4/MKV keep the parameter sets in the track header; the analyzer
-    // needs them, but they belong to no frame (nor to the ES cache — the
-    // keyframes get them inserted below).
-    let config = demuxer.config_nals();
-    if !config.is_empty() {
-        analyzer.analyze(0, config, &mut diags);
-    }
-
-    while let Some(au) = demuxer.read()? {
-        let decode_index = frames.len() as u32;
-        let Some(mut summary) = analyzer.analyze(decode_index, au.data, &mut diags) else {
-            // Parameter sets only (no picture): bytes still belong to the
-            // ES so offsets stay contiguous; attribute them to the next
-            // frame by simply writing them through.
-            es_writer.write_all(au.data)?;
-            es_offset += au.data.len() as u64;
-            continue;
-        };
-        summary.is_keyframe |= au.keyframe;
-        let rewritten = analyzer.insert_parameter_sets(au.data, &mut summary);
-        let bytes = rewritten.as_deref().unwrap_or(au.data);
-
-        es_writer.write_all(bytes)?;
-        frames.push(FrameRecord {
-            decode_index,
-            display_index: decode_index, // finalized below
-            size_bytes: au.coded_size,
-            file_offset: au.file_offset,
-            es_offset,
-            es_size: bytes.len() as u32,
-            frame_type: summary.frame_type,
-            is_keyframe: summary.is_keyframe,
-            is_idr: summary.is_idr,
-            is_rasl: summary.is_rasl,
-            pts: au.pts_ns,
-            dts: au.dts_ns,
-            duration: au.duration_ns,
-            poc: summary.poc,
-            temporal_id: summary.temporal_id,
-            slice_qp: summary.slice_qp.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
-            slice_count: summary.slice_count,
-            ref_frames: summary.ref_frames.clone(),
-        });
-        es_offset += bytes.len() as u64;
-        let fraction = au.progress;
-        analysis.push(summary);
-
-        if frames.len().is_multiple_of(64) {
-            progress(IndexProgress {
-                frames_indexed: frames.len() as u32,
-                fraction,
-            });
+impl IndexPass {
+    /// Analyzes every access unit. Keyframes that lack in-band parameter
+    /// sets get an insertion recorded, so a decode can start at any
+    /// keyframe.
+    fn run(
+        &mut self,
+        demuxer: &mut Demuxer,
+        analyzer: &mut dyn AuAnalyzer,
+        progress: &mut impl FnMut(IndexProgress),
+    ) -> Result<(), Error> {
+        // MP4/MKV keep the parameter sets in the track header; the analyzer
+        // needs them, but they belong to no frame.
+        let config = demuxer.config_nals();
+        if !config.is_empty() {
+            analyzer.analyze(0, config, &mut self.diags);
         }
+
+        // Insertions repeat the same parameter sets; share the bytes.
+        let mut last_block: Option<Arc<[u8]>> = None;
+        while let Some(au) = demuxer.read()? {
+            let decode_index = self.frames.len() as u32;
+            // Packets without a picture (parameter sets only) are no frame;
+            // the source reader passes them on with the next one.
+            let Some(mut summary) = analyzer.analyze(decode_index, au.data, &mut self.diags) else {
+                continue;
+            };
+            let file_offset = au.file_offset.ok_or_else(|| {
+                Error::Pipeline("the container reports no packet positions".into())
+            })?;
+            if self
+                .packet_frames
+                .insert((file_offset, au.coded_size), decode_index)
+                .is_some()
+            {
+                return Err(Error::Pipeline(format!(
+                    "two packets at file offset {file_offset:#x} (laced video?)"
+                )));
+            }
+            summary.is_keyframe |= au.keyframe;
+            if let Some(ins) = analyzer.parameter_sets_to_insert(au.data, &mut summary) {
+                let bytes = match &last_block {
+                    Some(b) if **b == *ins.bytes => b.clone(),
+                    _ => Arc::from(ins.bytes),
+                };
+                last_block = Some(bytes.clone());
+                self.insertions.insert(
+                    decode_index,
+                    ParamInsertion {
+                        at: ins.at as u32,
+                        bytes,
+                    },
+                );
+            }
+
+            self.frames.push(FrameRecord {
+                decode_index,
+                display_index: decode_index, // finalized below
+                size_bytes: au.coded_size,
+                file_offset,
+                frame_type: summary.frame_type,
+                is_keyframe: summary.is_keyframe,
+                is_idr: summary.is_idr,
+                is_rasl: summary.is_rasl,
+                pts: au.pts_ns,
+                dts: au.dts_ns,
+                duration: au.duration_ns,
+                poc: summary.poc,
+                temporal_id: summary.temporal_id,
+                slice_qp: summary.slice_qp.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+                slice_count: summary.slice_count,
+                ref_frames: summary.ref_frames.clone(),
+            });
+            let fraction = au.progress;
+            self.analysis.push(summary);
+
+            if self.frames.len().is_multiple_of(64) {
+                progress(IndexProgress {
+                    frames_indexed: self.frames.len() as u32,
+                    fraction,
+                });
+            }
+        }
+        Ok(())
     }
-    es_writer.flush()?;
-    Ok((frames, analysis, diags, es_offset))
 }
 
 fn make_analyzer(codec: Codec) -> Box<dyn AuAnalyzer> {

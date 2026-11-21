@@ -9,11 +9,10 @@ fn fixture(name: &str) -> std::path::PathBuf {
 
 fn index(name: &str) -> streamlens_core::StreamIndex {
     let mut called = false;
-    let (idx, _analyzer) = Indexer::default()
+    let (idx, _analyzer) = Indexer
         .index(&fixture(name), |_| called = true)
         .unwrap_or_else(|e| panic!("indexing {name}: {e}"));
     assert!(called, "progress callback never fired");
-    std::fs::remove_file(&idx.es_cache_path).ok();
     idx
 }
 
@@ -28,20 +27,16 @@ fn assert_h264_fixture_shape(idx: &streamlens_core::StreamIndex, container: &str
     let f0 = &idx.frames[0];
     assert_eq!(f0.frame_type, FrameType::I);
     assert!(f0.is_idr && f0.is_keyframe);
-    assert_eq!(f0.es_offset, 0);
     assert!(idx.frames.iter().any(|f| f.frame_type == FrameType::B));
 
-    // ES offsets are contiguous and sizes sum to the cache size.
-    let mut expect = None;
-    for f in &idx.frames {
-        if let Some(e) = expect {
-            // Parameter-set-only stretches may sit between AUs, so offsets
-            // are monotonically non-decreasing, never overlapping.
-            assert!(f.es_offset >= e, "overlapping AU at {}", f.decode_index);
-        }
-        expect = Some(f.es_offset + f.es_size as u64);
-    }
-    assert_eq!(expect.unwrap(), idx.es_size);
+    // Every frame has its own packet in the file.
+    let offsets: std::collections::HashSet<u64> =
+        idx.frames.iter().map(|f| f.file_offset).collect();
+    assert_eq!(offsets.len(), idx.frames.len());
+    assert_eq!(
+        idx.video_bytes,
+        idx.frames.iter().map(|f| f.size_bytes as u64).sum::<u64>()
+    );
 
     // Display order is a permutation and differs from decode order (B-frames).
     let mut disp: Vec<u32> = idx.frames.iter().map(|f| f.display_index).collect();
@@ -110,7 +105,7 @@ fn frame_sizes_and_offsets_match_ffprobe() {
             .output()
             .expect("ffprobe available");
         assert!(out.status.success(), "ffprobe failed on {name}");
-        let expected: Vec<(u32, Option<u64>)> = String::from_utf8(out.stdout)
+        let expected: Vec<(u32, u64)> = String::from_utf8(out.stdout)
             .unwrap()
             .lines()
             .filter(|l| !l.is_empty())
@@ -118,17 +113,16 @@ fn frame_sizes_and_offsets_match_ffprobe() {
                 // MPEG-TS rows carry a trailing (side data) field.
                 let mut fields = l.split(',');
                 let size = fields.next().unwrap().parse().unwrap();
-                let pos = fields.next().and_then(|p| p.parse().ok());
+                let pos = fields.next().unwrap().parse().unwrap();
                 (size, pos)
             })
             .collect();
-        let idx = Indexer::default().index(&fixture(name), |_| {}).unwrap().0;
-        let actual: Vec<(u32, Option<u64>)> = idx
+        let idx = Indexer.index(&fixture(name), |_| {}).unwrap().0;
+        let actual: Vec<(u32, u64)> = idx
             .frames
             .iter()
             .map(|f| (f.size_bytes, f.file_offset))
             .collect();
         assert_eq!(actual, expected, "{name}");
-        std::fs::remove_file(&idx.es_cache_path).ok();
     }
 }

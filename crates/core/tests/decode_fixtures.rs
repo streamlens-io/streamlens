@@ -196,28 +196,24 @@ fn hevc_end_to_end() {
     assert_eq!(f7.decode_index, 7);
 }
 
-#[test]
-fn indexer_cleans_up_with_session_drop() {
-    let session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
-    let path = session.index.es_cache_path.clone();
-    assert!(path.exists());
-    drop(session);
-    assert!(!path.exists(), "ES cache not removed on drop");
-}
-
-/// Every frame of `path` decoded by ffmpeg, in display order (yuv420p luma
-/// only).
-fn ffmpeg_luma_frames(path: &std::path::Path, w: usize, h: usize) -> Vec<Vec<u8>> {
+/// Every frame of `path` decoded by ffmpeg, in display order (luma only,
+/// 8-bit or 10-bit little endian like the decoded planes).
+fn ffmpeg_luma_frames(path: &std::path::Path, w: usize, h: usize, bit_depth: u8) -> Vec<Vec<u8>> {
+    let (pix_fmt, bps) = if bit_depth > 8 {
+        ("yuv420p10le", 2)
+    } else {
+        ("yuv420p", 1)
+    };
     let out = std::process::Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
-        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+        .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"])
         .output()
         .expect("ffmpeg available");
     assert!(out.status.success(), "ffmpeg failed on {}", path.display());
     out.stdout
-        .chunks_exact(w * h * 3 / 2)
-        .map(|f| f[..w * h].to_vec())
+        .chunks_exact(w * h * 3 / 2 * bps)
+        .map(|f| f[..w * h * bps].to_vec())
         .collect()
 }
 
@@ -237,7 +233,7 @@ fn assert_seek_labels_match_ffmpeg_at(path: &std::path::Path) {
         probe.index.info.width as usize,
         probe.index.info.height as usize,
     );
-    let reference = ffmpeg_luma_frames(path, w, h);
+    let reference = ffmpeg_luma_frames(path, w, h, probe.index.info.bit_depth);
     assert_eq!(reference.len(), probe.index.frames.len());
     let keyframes: Vec<u32> = probe
         .index
@@ -321,6 +317,21 @@ fn seek_labels_match_ffmpeg_h264_open_gop() {
 #[test]
 fn seek_labels_match_ffmpeg_hevc() {
     assert_seek_labels_match_ffmpeg("hevc_8bit.mp4");
+}
+
+#[test]
+fn seek_labels_match_ffmpeg_every_container() {
+    // Seeking reads the frames back from the file: by byte position for
+    // raw ES, by timestamp for MP4/MKV/TS.
+    for name in [
+        "h264_prog.264",
+        "h264.ts",
+        "h264_interlaced.264",
+        "hevc_8bit.265",
+        "hevc_10bit.mkv",
+    ] {
+        assert_seek_labels_match_ffmpeg(name);
+    }
 }
 
 #[test]

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use streamlens_types::FrameType;
 
 use crate::analyzer::{
-    AuAnalyzer, AuSummary, NalSummary, ParameterSetStore, RecordedNal, StreamProps,
+    AuAnalyzer, AuSummary, Insertion, NalSummary, ParameterSetStore, RecordedNal, StreamProps,
 };
 use crate::bitread::{BitReader, Recorder};
 use crate::diag::{Diagnostics, Severity};
@@ -204,7 +204,7 @@ impl AuAnalyzer for H265Analyzer {
         })
     }
 
-    fn insert_parameter_sets(&self, au: &[u8], summary: &mut AuSummary) -> Option<Vec<u8>> {
+    fn parameter_sets_to_insert(&self, au: &[u8], summary: &mut AuSummary) -> Option<Insertion> {
         self.param_sets.splice(au, summary, &[32, 33, 34], 35, |t| {
             let n = NalType::from_raw(t);
             (n.name(), n.is_vcl())

@@ -209,7 +209,7 @@ impl Worker {
                 }
             }
             Command::Headers(idx) => {
-                let Some(s) = self.session.as_ref() else {
+                let Some(s) = self.session.as_mut() else {
                     return;
                 };
                 let event = match s.headers(idx) {

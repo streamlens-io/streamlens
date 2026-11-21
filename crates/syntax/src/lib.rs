@@ -10,7 +10,7 @@ pub mod h264;
 pub mod h265;
 pub mod nal;
 
-pub use analyzer::{AuAnalyzer, AuSummary, NalSummary};
+pub use analyzer::{AuAnalyzer, AuSummary, Insertion, NalSummary};
 
 pub use bitread::{BitReader, FieldNode, FieldSink, FieldTree, FieldValue, NoRecord, Recorder};
 

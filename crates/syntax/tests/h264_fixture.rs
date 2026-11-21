@@ -153,7 +153,7 @@ fn parameter_sets_are_inserted_into_keyframes_that_lack_them() {
         let Some(mut summary) = analyzer.analyze(i as u32, &stripped, &mut diags) else {
             continue;
         };
-        let Some(rewritten) = analyzer.insert_parameter_sets(&stripped, &mut summary) else {
+        let Some(insertion) = analyzer.parameter_sets_to_insert(&stripped, &mut summary) else {
             assert!(
                 i == 0 || !summary.is_keyframe,
                 "keyframe {i} without SPS/PPS left unchanged"
@@ -162,6 +162,7 @@ fn parameter_sets_are_inserted_into_keyframes_that_lack_them() {
         };
         assert!(summary.is_keyframe);
         inserted += 1;
+        let rewritten = insertion.apply(&stripped);
         // The summary describes the rewritten AU exactly.
         let actual: Vec<(usize, u8)> = iter_nals(&rewritten)
             .map(|n| (n.start_code_offset, n.bytes[0] & 0x1F))

@@ -8,6 +8,7 @@ pub mod indexer;
 pub mod metrics;
 pub mod playback;
 pub mod session;
+mod source;
 pub mod sweep;
 
 pub use cache::CacheWindow;
@@ -34,41 +35,4 @@ pub enum Error {
     Pipeline(String),
     #[error("unsupported codec: {0}")]
     UnsupportedCodec(String),
-}
-
-/// Positioned read (pread): fills `buf` from `offset` without depending on
-/// the file cursor.
-#[cfg(unix)]
-pub(crate) fn read_exact_at(
-    file: &std::fs::File,
-    buf: &mut [u8],
-    offset: u64,
-) -> std::io::Result<()> {
-    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
-}
-
-/// Windows `seek_read` can return short reads and moves the file cursor —
-/// callers here never rely on the cursor.
-#[cfg(windows)]
-pub(crate) fn read_exact_at(
-    file: &std::fs::File,
-    mut buf: &mut [u8],
-    mut offset: u64,
-) -> std::io::Result<()> {
-    use std::os::windows::fs::FileExt;
-    while !buf.is_empty() {
-        match file.seek_read(buf, offset)? {
-            0 => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer",
-                ))
-            }
-            n => {
-                buf = &mut buf[n..];
-                offset += n as u64;
-            }
-        }
-    }
-    Ok(())
 }

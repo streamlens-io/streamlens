@@ -29,14 +29,8 @@ pub struct FrameRecord {
     /// Size of this frame in the analyzed file: the container packet as
     /// stored (what the frame costs in bitrate there).
     pub size_bytes: u32,
-    /// Byte position of the frame's packet in the analyzed file, when the
-    /// demuxer reports one.
-    pub file_offset: Option<u64>,
-    /// Range of the access unit in the normalized elementary-stream cache
-    /// (Annex B, parameter sets in front of keyframes). Used for decoding
-    /// and header re-parsing; not a property of the file.
-    pub es_offset: u64,
-    pub es_size: u32,
+    /// Byte position of the frame's packet in the analyzed file.
+    pub file_offset: u64,
     pub frame_type: FrameType,
     /// Random access point (IDR / CRA / BLA, or recovery point).
     pub is_keyframe: bool,

@@ -307,15 +307,13 @@ impl App {
                 .map(|p| format!("  PSNR-Y {p:.2} dB"))
                 .unwrap_or_default();
             format!(
-                "Dec {}  Disp {}  Type {}{}  Size {} B{}  POC {}  QP {}{}",
+                "Dec {}  Disp {}  Type {}{}  Size {} B  Offset {:#x}  POC {}  QP {}{}",
                 f.decode_index,
                 f.display_index,
                 frame_type_name(f.frame_type),
                 if f.is_idr { " (IDR)" } else { "" },
                 f.size_bytes,
-                f.file_offset
-                    .map(|o| format!("  Offset {o:#x}"))
-                    .unwrap_or_default(),
+                f.file_offset,
                 f.poc,
                 f.slice_qp,
                 psnr_str,

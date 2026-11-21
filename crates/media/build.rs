@@ -80,10 +80,10 @@ fn main() {
         )
         .clang_arg(format!("-I{}", ffmpeg.join("include").display()))
         .allowlist_function(
-            "avformat_.*|av_read_frame|avio_.*|avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*|av_strerror",
+            "avformat_.*|av_read_frame|av_seek_frame|avio_.*|avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*|av_strerror",
         )
         .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID|AVMediaType|AVDiscard")
-        .allowlist_var("AV_.*|FF_.*|SL_H264.*")
+        .allowlist_var("AV_.*|AVSEEK_.*|FF_.*|SL_H264.*")
         .layout_tests(layout_tests)
         .derive_default(true)
         .generate()
