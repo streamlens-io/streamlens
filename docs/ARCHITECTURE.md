@@ -5,13 +5,14 @@ it is, and in what order to read the code.
 
 ## The one-paragraph version
 
-Opening a file runs an **index pass**: libavformat demuxes any container,
-length-prefixed samples (MP4/MKV) are rewritten as Annex-B access units,
-and every AU is (a) appended to a flat **elementary-stream
-cache file** and (b) fed through a pure-Rust **syntax analyzer** that parses
-headers, computes POC, emulates the DPB and produces one compact
-`FrameRecord` per frame. From then on the container is irrelevant: byte
-offsets and on-demand decoding all address the ES cache. Display decoding
+Opening a file starts an **index pass** on a background thread:
+libavformat demuxes any container, length-prefixed samples (MP4/MKV) are
+rewritten as Annex-B access units, and every AU is fed through a pure-Rust
+**syntax analyzer** that parses headers, computes POC, emulates the DPB and
+produces one compact `FrameRecord` per frame. The index is published in
+growing snapshots, so a long file can be viewed and played while it is
+still indexed. Nothing is copied: decoding seeks the file and reads the
+frames back, matching packets by file position and size. Display decoding
 runs through one of two **analysis decoders** (a patched FFmpeg H.264
 decoder, a patched libde265) on a decoder thread; each picture comes back
 with a `FrameAnalysis` — per-block QP, types, motion vectors, partitions,
@@ -43,10 +44,9 @@ Dependency direction: `types ← syntax ← core ← app` and
 
 - `FrameRecord` — one frame as the *indexer* sees it: decode/display index,
   size and position in the analyzed file (`size_bytes`, `file_offset` —
-  what the UI shows, equal to ffprobe's packet size/pos), the AU's range in
-  the ES cache (`es_offset`, `es_size` — for decoding only), type, keyframe
-  flags, PTS/DTS, POC, slice QP, reference lists. Kept small (streams can
-  have 100k+ frames).
+  what the UI shows, equal to ffprobe's packet size/pos; also how the
+  source reader finds the frame), type, keyframe flags, PTS/DTS, POC, slice
+  QP, reference lists. Kept small (streams can have 100k+ frames).
 - `FrameAnalysis` — one frame as the *decoder* sees it. Block storage is
   **arena-style**: flat `Vec<CodingUnit>`, `Vec<PredictionUnit>`,
   `Vec<TransformUnit>`, with superblocks/CUs holding index ranges
@@ -81,9 +81,10 @@ trait AuAnalyzer {
 }
 ```
 
-`insert_parameter_sets` keeps keyframes self-contained: a keyframe AU that
-carries no VPS/SPS/PPS in-band gets the last-seen ones inserted before it
-goes into the ES cache, so a decode can start at any keyframe.
+`parameter_sets_to_insert` keeps keyframes self-contained: for a keyframe
+AU that carries no VPS/SPS/PPS in-band, the index records the last-seen
+ones and where to insert them, and the source reader inserts them, so a
+decode can start at any keyframe.
 
 A new codec = a new `AuAnalyzer` implementation.
 
@@ -125,18 +126,26 @@ records and stage planes); the H.264 decoder uses auto frame threading
 
 ## Core (`crates/core`)
 
-- `indexer.rs` — the index pass described above. Writes the ES cache with
-  parameter sets in front of every keyframe: any keyframe-aligned byte
-  range decodes standalone.
+- `indexer.rs` — the index pass described above, as a blocking call
+  (`Indexer`) or on a background thread (`start`). Snapshots are published
+  only at clean cuts — every frame before the cut sorts before every frame
+  after it, with 32 frames known past it — so display positions never
+  change once published. `chunked.rs` stores the frame lists in shared
+  chunks, so a snapshot copies only the last partial chunk. `IndexHandle`
+  holds the newest snapshot for every reader.
+- `source.rs` — `AuReader`: seeks the file to a frame (by timestamp, or by
+  byte position for raw ES), then reads forward in decode order and applies
+  the parameter-set insertions.
 - `decode.rs` — `DecodeService`, the **streaming decoder**: a decoder
-  thread fed one AU at a time, across GOP boundaries (decoders take
-  mid-stream keyframes in stride), within a window ahead of the target.
+  thread reading through an `AuReader`, across GOP boundaries (decoders
+  take mid-stream keyframes in stride), within a window ahead of the
+  target.
   Restarted only on real seeks. Decoding continues between calls, so
   playback can hide long decodes in idle gaps. A picture the decoder drops
   (e.g. an open-GOP leading picture after a fresh start) is just missing;
   a target that never comes out is detected by draining the decoder.
-- `cache.rs` — byte-budgeted LRU of decoded frames; the budget scales to
-  two GOPs so backwards stepping is a cache hit even at 4K.
+- `cache.rs` — the decoded frames in a window around the playhead: N ahead
+  and M behind in decode order (Settings dialog; default 128/64).
 - `playback.rs` — the paced **playback engine** used by both the app worker
   and the benchmarks: pre-buffers on start, then during each frame-interval
   gap decodes ahead (cost-predicted per keyframe/non-keyframe EMA) so
@@ -145,7 +154,10 @@ records and stage planes); the H.264 decoder uses auto frame threading
   smoothness stats (fps, p99/max gap, late count) and backs
   `tests/playback_smoothness.rs` and `examples/play_bench.rs`.
 - `session.rs` — ties index + decode + cache; the worker-facing API
-  (`frame()`, `headers()`, `es_bytes()`, `set_stages()`).
+  (`open_progressive()`, `frame()`, `headers()`, `set_stages()`,
+  `set_window()`, `share()` for the sweep).
+- `sweep.rs` — background pass that decodes every frame for the bits chart
+  and PSNR; it shares the session's index and follows it while it grows.
 - `metrics.rs` — PSNR/SSIM/MSE/MSAD/DELTA kernels (8/10-bit).
 
 ## App (`crates/app`)
@@ -184,7 +196,8 @@ Block Info view shown in its own pane with a cursor-following magnifier;
 1. `crates/types/src/analysis.rs` — the data model everything meets at.
 2. `crates/syntax/src/bitread.rs`, then `h264/analyzer.rs` top to bottom —
    the parse-side world view.
-3. `crates/core/src/indexer.rs` and `index.rs` — the ES-cache trick.
+3. `crates/core/src/indexer.rs`, `index.rs` and `source.rs` — the
+   progressive index and how frames are read back from the file.
 4. `crates/core/src/decode.rs` — the streaming decoder (the subtlest file;
    read the module comment first), then `playback.rs`.
 5. `crates/media/src/h264.rs` — decoder→`FrameAnalysis` mapping
