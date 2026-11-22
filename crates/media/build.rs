@@ -80,10 +80,10 @@ fn main() {
         )
         .clang_arg(format!("-I{}", ffmpeg.join("include").display()))
         .allowlist_function(
-            "avformat_.*|av_read_frame|av_seek_frame|avio_.*|avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*|av_strerror",
+            "avformat_.*|av_read_frame|av_seek_frame|av_dict_.*|avio_.*|avcodec_.*|av_packet_.*|av_frame_.*|av_opt_set.*|av_log_set_level|av_image_.*|av_strerror",
         )
         .allowlist_type("SLH264.*|AVFrameSideDataType|AVPixelFormat|AVCodecID|AVMediaType|AVDiscard")
-        .allowlist_var("AV_.*|AVSEEK_.*|FF_.*|SL_H264.*")
+        .allowlist_var("AV_.*|AVFMT_.*|AVSEEK_.*|FF_.*|SL_H264.*")
         .layout_tests(layout_tests)
         .derive_default(true)
         .generate()
@@ -104,12 +104,15 @@ fn main() {
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
 
-    // FFmpeg is configured with --disable-autodetect: no zlib, no system
-    // frameworks. libde265 is C++.
+    // FFmpeg is configured with --disable-autodetect: no zlib, and only the
+    // TLS backend vendor/build-decoders.sh picks per OS. libde265 is C++.
     match target_os.as_str() {
         "macos" => {
             println!("cargo:rustc-link-lib=c++");
             println!("cargo:rustc-link-lib=m");
+            // SecureTransport
+            println!("cargo:rustc-link-lib=framework=Security");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
             // libde265's x86 code calls __builtin_cpu_supports, whose
             // helpers (___cpu_model, ___cpu_indicator_init) live in clang's
             // runtime library; rustc links with -nodefaultlibs, so it has
@@ -131,10 +134,24 @@ fn main() {
         "windows" => {
             println!("cargo:rustc-link-lib=stdc++");
             println!("cargo:rustc-link-lib=bcrypt");
+            // Winsock and Schannel
+            for lib in ["ws2_32", "secur32", "ncrypt", "crypt32"] {
+                println!("cargo:rustc-link-lib={lib}");
+            }
         }
         _ => {
             println!("cargo:rustc-link-lib=stdc++");
             println!("cargo:rustc-link-lib=m");
+            // mbedTLS, built statically by vendor/build-decoders.sh.
+            let mbedtls = vendor.join("mbedtls-prefix/lib");
+            println!("cargo:rustc-link-search=native={}", mbedtls.display());
+            for lib in ["mbedtls", "mbedx509", "mbedcrypto"] {
+                println!("cargo:rustc-link-lib=static={lib}");
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    mbedtls.join(format!("lib{lib}.a")).display()
+                );
+            }
         }
     }
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use iced::keyboard;
 use iced::widget::{button, column, container, pane_grid, row, text, PaneGrid};
 use iced::{Element, Fill, Subscription, Task, Theme};
-use streamlens_core::{DecodedFrame, StreamIndex, SweepFrame};
+use streamlens_core::{DecodedFrame, Source, StreamIndex, SweepFrame};
 use streamlens_types::FrameType;
 
 use crate::panels::Tab;
@@ -23,8 +23,8 @@ use crate::widgets::overlays::{Glyph, OverlaySettings, Segment};
 use crate::worker::{self, Command};
 
 mod chrome;
+mod dialogs;
 mod panes;
-mod settings_dialog;
 mod update;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -93,7 +93,7 @@ pub struct App {
     worker: Option<Sender<Command>>,
     index: Option<Arc<StreamIndex>>,
     indexing: Option<(u32, Option<f32>)>,
-    file: Option<PathBuf>,
+    file: Option<Source>,
     /// Window width in logical pixels; the toolbar reflows below a
     /// breakpoint instead of clipping.
     window_width: f32,
@@ -156,6 +156,8 @@ pub struct App {
 
     settings: Settings,
     settings_open: bool,
+    url_open: bool,
+    url_input: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +222,10 @@ pub enum Message {
     SetFramesBehind(u32),
     /// Sends the edited frame window to the worker (slider released).
     ApplyWindow,
+    /// Opens or closes the "Open URL" dialog.
+    ToggleUrlDialog,
+    UrlInput(String),
+    OpenUrl,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -264,7 +270,7 @@ impl App {
             worker: None,
             index: None,
             indexing: None,
-            file: std::env::args().nth(1).map(PathBuf::from),
+            file: std::env::args().nth(1).map(|a| Source::parse(&a)),
             // Matches main.rs's initial window size (resize events only
             // arrive on change); the STREAMLENS_WINDOW hook overrides both.
             window_width: std::env::var("STREAMLENS_WINDOW")
@@ -312,16 +318,15 @@ impl App {
             settings: Settings::load(),
             // Debug/testing hook: STREAMLENS_SETTINGS_OPEN=1
             settings_open: std::env::var("STREAMLENS_SETTINGS_OPEN").as_deref() == Ok("1"),
+            url_open: false,
+            url_input: String::new(),
         };
         (app, Task::none())
     }
 
     pub fn title(&self) -> String {
         match &self.file {
-            Some(p) => format!(
-                "StreamLens — {}",
-                p.file_name().unwrap_or_default().to_string_lossy()
-            ),
+            Some(source) => format!("StreamLens — {}", source.name()),
             None => "StreamLens".into(),
         }
     }
@@ -406,6 +411,8 @@ impl App {
         }
         if self.settings_open {
             self.with_settings_dialog(root.into())
+        } else if self.url_open {
+            self.with_url_dialog(root.into())
         } else {
             root.into()
         }

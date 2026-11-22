@@ -10,7 +10,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
 fn index(name: &str) -> streamlens_core::StreamIndex {
     let mut called = false;
     let (idx, _analyzer) = Indexer
-        .index(&fixture(name), |_| called = true)
+        .index(fixture(name), |_| called = true)
         .unwrap_or_else(|e| panic!("indexing {name}: {e}"));
     assert!(called, "progress callback never fired");
     idx
@@ -114,7 +114,7 @@ fn frame_sizes_and_offsets_match_ffprobe() {
                 (size, pos)
             })
             .collect();
-        let idx = Indexer.index(&fixture(name), |_| {}).unwrap().0;
+        let idx = Indexer.index(fixture(name), |_| {}).unwrap().0;
         let actual: Vec<(u32, u64)> = idx
             .frames
             .iter()
@@ -132,7 +132,7 @@ fn frame_sizes_and_offsets_match_ffprobe() {
 fn raw_es_frames_tile_the_file() {
     for name in ["h264_prog.264", "h264_interlaced.264", "hevc_8bit.265"] {
         let file_size = std::fs::metadata(fixture(name)).unwrap().len();
-        let idx = Indexer.index(&fixture(name), |_| {}).unwrap().0;
+        let idx = Indexer.index(fixture(name), |_| {}).unwrap().0;
         let mut expect = 0u64;
         for f in idx.frames.iter() {
             assert_eq!(f.file_offset, expect, "{name}: frame {}", f.decode_index);

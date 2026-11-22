@@ -15,7 +15,7 @@ fn decode_all(name: &str, stages: bool) -> Vec<Picture> {
 
 /// [`decode_all`] plus the number of access units fed.
 fn decode_all_counting(name: &str, stages: bool) -> (Vec<Picture>, u32) {
-    let mut demuxer = Demuxer::open(&fixture(name)).expect("open fixture");
+    let mut demuxer = Demuxer::open(&fixture(name).into()).expect("open fixture");
     let mut decoder = open_decoder(demuxer.codec(), stages).expect("open decoder");
     // Out-of-band parameter sets (MP4/MKV) go in front of the first AU, as
     // the decoder has to see them before any slice.

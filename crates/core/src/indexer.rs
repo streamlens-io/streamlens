@@ -7,12 +7,12 @@
 //! snapshots, so a long file can be viewed while it is still indexed.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use streamlens_media::Demuxer;
+use streamlens_media::{Demuxer, Source};
 use streamlens_syntax::analyzer::StreamProps;
 use streamlens_syntax::diag::Diagnostics;
 use streamlens_syntax::h264::H264Analyzer;
@@ -42,16 +42,17 @@ impl Indexer {
     /// (used to re-parse AUs for the Headers panel).
     pub fn index(
         &self,
-        path: &Path,
+        source: impl Into<Source>,
         mut progress: impl FnMut(IndexProgress),
     ) -> Result<(StreamIndex, Box<dyn AuAnalyzer>), Error> {
-        let (mut demuxer, analyzer) = open(path)?;
+        let source = source.into();
+        let (mut demuxer, analyzer) = open(&source)?;
         let analyzer = Mutex::new(analyzer);
         let mut last = None;
         run_pass(
             &mut demuxer,
             &analyzer,
-            path,
+            &source,
             None,
             &AtomicBool::new(false),
             &mut progress,
@@ -78,18 +79,18 @@ impl Drop for Indexing {
 /// snapshot is published (for short files, the complete index).
 /// `on_publish` sees every snapshot, the first one included.
 pub(crate) fn start(
-    path: &Path,
+    source: &Source,
     mut progress: impl FnMut(IndexProgress) + Send + 'static,
     on_publish: impl Fn(&Arc<StreamIndex>) + Send + 'static,
 ) -> Result<(IndexHandle, SharedAnalyzer, Indexing), Error> {
-    let (mut demuxer, analyzer) = open(path)?;
+    let (mut demuxer, analyzer) = open(source)?;
     let analyzer: SharedAnalyzer = Arc::new(Mutex::new(analyzer));
     let cancel = Arc::new(AtomicBool::new(false));
     let (first_tx, first_rx) = mpsc::channel::<Result<IndexHandle, Error>>();
 
     let thread_analyzer = analyzer.clone();
     let thread_cancel = cancel.clone();
-    let path: PathBuf = path.to_path_buf();
+    let source = source.clone();
     std::thread::Builder::new()
         .name("streamlens-index".into())
         .spawn(move || {
@@ -109,7 +110,7 @@ pub(crate) fn start(
             let result = run_pass(
                 &mut demuxer,
                 &thread_analyzer,
-                &path,
+                &source,
                 Some(Duration::from_millis(200)),
                 &thread_cancel,
                 &mut progress,
@@ -118,7 +119,7 @@ pub(crate) fn start(
             if let Err(e) = result {
                 // Before the first snapshot the caller gets the error;
                 // after it, what was published stays usable.
-                log::error!("indexing {}: {e}", path.display());
+                log::error!("indexing {source}: {e}");
                 let _ = first_tx.send(Err(e));
             }
         })?;
@@ -129,11 +130,9 @@ pub(crate) fn start(
     Ok((handle, analyzer, Indexing { cancel }))
 }
 
-fn open(path: &Path) -> Result<(Demuxer, Box<dyn AuAnalyzer>), Error> {
-    let demuxer = Demuxer::open(path).map_err(|e| match e {
-        streamlens_media::Error::NoVideoStream => {
-            Error::NoVideoStream(path.to_string_lossy().into_owned())
-        }
+fn open(source: &Source) -> Result<(Demuxer, Box<dyn AuAnalyzer>), Error> {
+    let demuxer = Demuxer::open(source).map_err(|e| match e {
+        streamlens_media::Error::NoVideoStream => Error::NoVideoStream(source.to_string()),
         e => e.into(),
     })?;
     let analyzer: Box<dyn AuAnalyzer> = match demuxer.codec() {
@@ -150,14 +149,21 @@ fn open(path: &Path) -> Result<(Demuxer, Box<dyn AuAnalyzer>), Error> {
 fn run_pass(
     demuxer: &mut Demuxer,
     analyzer: &Mutex<Box<dyn AuAnalyzer>>,
-    path: &Path,
+    source: &Source,
     interval: Option<Duration>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(IndexProgress),
     publish: &mut dyn FnMut(StreamIndex),
 ) -> Result<(), Error> {
     let lock = || analyzer.lock().unwrap_or_else(|e| e.into_inner());
-    let mut builder = Builder::new(demuxer.codec(), path);
+    let container = match source {
+        Source::File(p) => p
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        Source::Url(_) => demuxer.format_name().to_string(),
+    };
+    let mut builder = Builder::new(demuxer.codec(), source, container);
 
     // MP4/MKV keep the parameter sets in the track header; the analyzer
     // needs them, but they belong to no frame.
@@ -221,8 +227,7 @@ fn run_pass(
     }
     if analyzed == 0 {
         return Err(Error::Pipeline(format!(
-            "no decodable video frames found in {}",
-            path.display()
+            "no decodable video frames found in {source}"
         )));
     }
     builder.publish_ready(true);
@@ -235,7 +240,8 @@ type Pending = (FrameRecord, AuSummary, u32);
 /// Collects frames and moves them into the published lists at clean cuts.
 struct Builder {
     codec: Codec,
-    path: PathBuf,
+    source: Source,
+    container: String,
     frames: Chunked<FrameRecord>,
     analysis: Chunked<AuSummary>,
     display_to_decode: Chunked<u32>,
@@ -255,10 +261,11 @@ fn display_key(p: &Pending) -> (u32, i32, u32) {
 }
 
 impl Builder {
-    fn new(codec: Codec, path: &Path) -> Self {
+    fn new(codec: Codec, source: &Source, container: String) -> Self {
         Self {
             codec,
-            path: path.to_path_buf(),
+            source: source.clone(),
+            container,
             frames: Chunked::default(),
             analysis: Chunked::default(),
             display_to_decode: Chunked::default(),
@@ -366,11 +373,7 @@ impl Builder {
                 bit_depth: props.bit_depth,
                 chroma_format: props.chroma_format,
                 frame_rate: props.frame_rate,
-                container: self
-                    .path
-                    .extension()
-                    .map(|e| e.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                container: self.container.clone(),
                 duration_ns: self.stats.duration_ns(),
             },
             frames: self.frames.clone(),
@@ -379,7 +382,7 @@ impl Builder {
             qp_range: self.stats.qp_range,
             stats: self.stats.stats(),
             diagnostics: self.diags.clone(),
-            path: self.path.clone(),
+            source: self.source.clone(),
             video_bytes: self.stats.video_bytes,
             insertions: self.insertions.clone(),
             complete,
@@ -467,8 +470,8 @@ impl StatsAcc {
 mod tests {
     use super::*;
 
-    fn fixture(name: &str) -> PathBuf {
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures")).join(name)
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures")).join(name)
     }
 
     /// Publishing at every possible clean cut must give exactly the display
@@ -481,13 +484,13 @@ mod tests {
             "hevc_8bit.mp4",
             "hevc_10bit.mkv",
         ] {
-            let (mut demuxer, analyzer) = open(&fixture(name)).unwrap();
+            let (mut demuxer, analyzer) = open(&fixture(name).into()).unwrap();
             let analyzer = Mutex::new(analyzer);
             let mut snapshots = Vec::new();
             run_pass(
                 &mut demuxer,
                 &analyzer,
-                &fixture(name),
+                &fixture(name).into(),
                 Some(Duration::ZERO),
                 &AtomicBool::new(false),
                 &mut |_| {},

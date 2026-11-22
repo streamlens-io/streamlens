@@ -18,6 +18,7 @@ pub use index::{IndexProgress, StreamIndex};
 pub use indexer::Indexer;
 pub use playback::Playback;
 pub use session::{estimated_frame_bytes, Session};
+pub use streamlens_media::Source;
 /// Syntax trees for the Headers panel; re-exported so the UI depends on
 /// core only.
 pub use streamlens_syntax::{analyzer::RecordedNal, FieldNode};

@@ -9,13 +9,13 @@ use std::sync::Arc;
 use iced::futures::channel::mpsc as iced_mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
 use streamlens_core::{
-    CacheWindow, DecodedFrame, Playback, Session, StreamIndex, Sweep, SweepFrame,
+    CacheWindow, DecodedFrame, Playback, Session, Source, StreamIndex, Sweep, SweepFrame,
 };
 
 /// Commands from the UI to the worker.
 #[derive(Debug, Clone)]
 pub enum Command {
-    Open(PathBuf),
+    Open(Source),
     /// Decode and deliver a frame (decode-order index).
     Frame(u32),
     /// Start streaming frames in display order from this display position.
@@ -178,7 +178,7 @@ impl Worker {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Open(path) => self.open(path),
+            Command::Open(source) => self.open(source),
             Command::Frame(idx) => {
                 self.play = None;
                 self.set_sweep_paused(false);
@@ -231,7 +231,7 @@ impl Worker {
         }
     }
 
-    fn open(&mut self, path: PathBuf) {
+    fn open(&mut self, source: Source) {
         self.play = None;
         self.prefetch = None;
         self.sweep = None; // cancel; a new one starts once the file is open
@@ -248,7 +248,7 @@ impl Worker {
         let on_publish = move |index: &Arc<StreamIndex>| {
             let _ = tx.unbounded_send(Event::Index(index.clone()));
         };
-        match Session::open_progressive(&path, progress, on_publish) {
+        match Session::open_progressive(&source, progress, on_publish) {
             Ok(mut s) => {
                 s.set_window(self.window);
                 self.session = Some(s);

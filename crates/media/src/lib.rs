@@ -8,9 +8,11 @@ pub mod demux;
 pub mod ffi;
 mod h264;
 mod h265;
+mod input;
 
 pub use decode::{open_decoder, Decoder, Picture};
 pub use demux::{AccessUnit, Demuxer};
+pub use input::Source;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

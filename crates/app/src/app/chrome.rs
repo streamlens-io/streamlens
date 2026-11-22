@@ -121,6 +121,7 @@ impl App {
         if self.window_width >= 1340.0 {
             row![
                 theme::accent("Open", Message::OpenDialog),
+                theme::flat("Open URL…", Message::ToggleUrlDialog),
                 transport,
                 zoom,
                 order,
@@ -137,6 +138,7 @@ impl App {
         } else {
             row![
                 theme::accent("Open", Message::OpenDialog),
+                theme::flat("Open URL…", Message::ToggleUrlDialog),
                 transport,
                 zoom,
                 order,

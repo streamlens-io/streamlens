@@ -83,7 +83,7 @@ fn smooth_hevc_10bit_mkv() {
 /// real time (catches accidental sleeps/serialization in the engine).
 #[test]
 fn fast_mode_is_decode_bound() {
-    let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("h264_prog.mp4"), |_| {}).unwrap();
     let n = session.index().frames.len();
     let stats = measure_playback(&mut session, 0, true, n).unwrap();
     assert!(

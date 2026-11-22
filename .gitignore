@@ -3,6 +3,7 @@
 .DS_Store
 /fixtures/tmp/
 /vendor/ffmpeg-prefix/
+/vendor/mbedtls-prefix/
 /vendor/libde265-prefix/
 # Compiled smoke-test binaries (sources are tracked).
 vendor/smoke/ffmpeg_h264_analysis

@@ -16,6 +16,10 @@ FF_PC="$VENDOR/ffmpeg-prefix/lib/pkgconfig"
 DE_PC="$VENDOR/libde265-prefix/lib/pkgconfig"
 ff_cflags=$(PKG_CONFIG_PATH="$FF_PC" pkg-config --cflags libavformat libavcodec libavutil)
 ff_libs=$(PKG_CONFIG_PATH="$FF_PC" pkg-config --static --libs libavformat libavcodec libavutil)
+# FFmpeg's .pc names the static mbedTLS (Linux) without its directory.
+if [ -d "$VENDOR/mbedtls-prefix/lib" ]; then
+  ff_libs="-L$VENDOR/mbedtls-prefix/lib $ff_libs"
+fi
 de_cflags=$(PKG_CONFIG_PATH="$DE_PC" pkg-config --cflags libde265)
 de_libs=$(PKG_CONFIG_PATH="$DE_PC" pkg-config --static --libs libde265)
 

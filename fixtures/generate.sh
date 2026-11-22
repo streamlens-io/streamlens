@@ -40,7 +40,15 @@ $FF -f lavfi -i "$SRC" -c:v libx265 -x265-params "bframes=2:keyint=25" \
 $FF -f lavfi -i "$SRC" -c:v libx265 -x265-params "bframes=2:keyint=25:sao=1" \
     -pix_fmt yuv420p hevc_8bit.265
 
+# HLS VOD playlist with fMP4 segments (init + 1 s media segments), the
+# shape camera/cloud HLS uses
+mkdir -p hls
+$FF -f lavfi -i "$SRC" -c:v libx264 -profile:v high -bf 2 -g 25 \
+    -pix_fmt yuv420p -f hls -hls_time 1 -hls_playlist_type vod \
+    -hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
+    -hls_segment_filename 'hls/segment-%d.m4s' hls/playlist.m3u8
+
 # Reference YUV of the source (for metrics tests)
 $FF -f lavfi -i "$SRC" -frames:v 15 -pix_fmt yuv420p ref_320x240_i420.yuv
 
-ls -la *.mp4 *.mkv *.ts *.264 *.265 *.yuv
+ls -la *.mp4 *.mkv *.ts *.264 *.265 *.yuv hls
