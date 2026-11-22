@@ -56,14 +56,20 @@ impl AuReader {
         }
         let index = self.index.get();
         let rec = &index.frames[target as usize];
-        // A fresh demuxer stands at the first frame already; seeking there
-        // costs a failed HLS seek and a reopen (below).
-        if std::mem::take(&mut self.at_start) && target == 0 && self.scan_to(rec)? {
+        // A fresh demuxer stands at the first frame already (unless the
+        // index starts mid-stream); seeking there costs a failed HLS seek
+        // and a reopen (below).
+        if std::mem::take(&mut self.at_start)
+            && target == 0
+            && index.start_ns.is_none()
+            && self.scan_to(rec)?
+        {
             return Ok(());
         }
         // A seek can fail (the HLS demuxer refuses timestamps before the
         // first packet it read, of any rendition) or land past the target
-        // (imprecise timestamp index): then read from the start instead.
+        // (imprecise timestamp index): then read from the start of the
+        // index instead.
         let seeked = match self.demuxer.seek(rec.dts.or(rec.pts), rec.file_offset) {
             Ok(()) => true,
             Err(e) => {
@@ -76,6 +82,12 @@ impl AuReader {
                 log::warn!("seek to frame {target} overshot; rescanning from the start");
             }
             self.demuxer = Demuxer::open(&index.source)?;
+            if let Some(ts) = index.start_ns {
+                if let Err(e) = self.demuxer.seek(Some(ts), 0) {
+                    log::debug!("seek to the index start failed ({e}); reading from the start");
+                    self.demuxer = Demuxer::open(&index.source)?;
+                }
+            }
             if !self.scan_to(rec)? {
                 return Err(Error::Pipeline(format!(
                     "frame {target} not found in the file"

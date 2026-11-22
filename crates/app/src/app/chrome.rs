@@ -10,7 +10,7 @@ use crate::widgets::barchart::{BarChart, ChartOrder};
 use crate::widgets::frame_view::{ChannelMode, ColorMatrix, Zoom};
 use crate::widgets::overview::Overview;
 
-use super::{frame_type_name, title_style_container, App, Message, Overlay, Playback};
+use super::{frame_type_name, goto, title_style_container, App, Message, Overlay, Playback};
 
 impl App {
     pub(super) fn toolbar(&self) -> Element<'_, Message> {
@@ -202,8 +202,15 @@ impl App {
         r = r.push(iced::widget::space::horizontal());
         if let Some(index) = &self.index {
             let disp = index.frames[self.current as usize].display_index;
+            // Frames count from where indexing started.
+            let from = index
+                .start_ns
+                .and(goto::origin(index))
+                .zip(index.frames[0].pts)
+                .map(|(origin, pts)| format!(" from {}", goto::format_duration(pts - origin)))
+                .unwrap_or_default();
             r = r.push(
-                text(format!("frame {disp} / {}", index.frames.len()))
+                text(format!("frame {disp} / {}{from}", index.frames.len()))
                     .size(11)
                     .font(iced::Font::MONOSPACE)
                     .color(theme::DIM),
@@ -258,23 +265,46 @@ impl App {
         let Some(index) = &self.index else {
             return row![].into();
         };
-        let current = match self.order {
-            ChartOrder::Decode => self.current,
-            ChartOrder::Display => index.frames[self.current as usize].display_index,
+        let n = index.frames.len() as u32;
+        let bar_to_decode = |bar: f32| {
+            let bar = (bar.max(0.0) as u32).min(n - 1);
+            match self.order {
+                ChartOrder::Decode => bar,
+                ChartOrder::Display => index.decode_for_display(bar).unwrap_or(0),
+            }
         };
         let (first, _, visible) = self.chart_view;
-        container(
-            canvas(Overview {
+        let overview = match goto::timeline(index) {
+            // Seconds from the stream start: the indexed part may start
+            // mid-stream.
+            Some((origin, len)) => {
+                let t = |d: u32| {
+                    index.frames[d as usize]
+                        .pts
+                        .map_or(0.0, |p| (p - origin) as f32 / 1e9)
+                };
+                let display = |i: u32| index.decode_for_display(i).unwrap_or(0);
+                let from = t(bar_to_decode(first));
+                Overview {
+                    total: len as f32 / 1e9,
+                    indexed: (t(display(0)), t(display(n - 1))),
+                    window: (from, t(bar_to_decode(first + visible)) - from),
+                    current: t(self.current),
+                }
+            }
+            None => Overview {
                 total: self.overview_total(),
-                indexed: index.frames.len() as f32,
+                indexed: (0.0, n as f32),
                 window: (first, visible),
-                current: current as f32,
-            })
-            .width(Fill)
-            .height(10),
-        )
-        .padding([0, 4])
-        .into()
+                current: match self.order {
+                    ChartOrder::Decode => self.current,
+                    ChartOrder::Display => index.frames[self.current as usize].display_index,
+                } as f32,
+            },
+        };
+        container(canvas(overview).width(Fill).height(10))
+            .padding([0, 4])
+            .into()
     }
 
     /// Frames in the whole stream: the index length once complete, else

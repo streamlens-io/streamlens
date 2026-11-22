@@ -166,6 +166,12 @@ impl Demuxer {
         &self.format_name
     }
 
+    /// Start time and duration of the input in ns, when the container
+    /// reports a duration.
+    pub fn span_ns(&self) -> Option<(i64, i64)> {
+        self.span_ns
+    }
+
     /// Parameter sets (and any SEI) the container keeps out of band in its
     /// decoder configuration record, as Annex B; empty for Annex B tracks,
     /// which carry them in-band. They apply to the whole track and are part

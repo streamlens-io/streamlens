@@ -334,6 +334,78 @@ fn hls_playlist_opens_and_seeks() {
 }
 
 #[test]
+fn index_can_start_mid_stream() {
+    // A pass that starts at a timestamp: frame 0 is a keyframe near it, and
+    // every frame from there matches the full index, decoded pixels too.
+    for name in [
+        "h264_prog.mp4",
+        "h264.ts",
+        "hevc_8bit.mp4",
+        "hls/playlist.m3u8",
+    ] {
+        let mut full = Session::open(fixture(name), |_| {}).unwrap();
+        let full_index = full.index();
+        let keyframe = full_index
+            .frames
+            .iter()
+            .filter(|f| f.is_keyframe)
+            .nth(1)
+            .unwrap()
+            .clone();
+        let start = keyframe.pts.unwrap() + 500_000_000;
+
+        let source = streamlens_core::Source::from(fixture(name));
+        let mut part = Session::open_progressive(&source, Some(start), |_| {}, |_| {}).unwrap();
+        let t = std::time::Instant::now();
+        while !part.index().complete {
+            assert!(t.elapsed().as_secs() < 30, "{name}: indexing stalled");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let index = part.index();
+        assert_eq!(index.start_ns, Some(start), "{name}");
+        let first = &index.frames[0];
+        assert!(first.is_keyframe, "{name}");
+        // MP4 and HLS seek to the keyframe before the target; MPEG-TS
+        // seeks by timestamp search and starts at the next keyframe.
+        assert!(
+            (first.pts.unwrap() - start).abs() <= 1_000_000_000,
+            "{name}"
+        );
+        let offset = full_index
+            .frames
+            .iter()
+            .position(|f| f.pts == first.pts)
+            .unwrap();
+        assert_eq!(
+            index.frames.len(),
+            full_index.frames.len() - offset,
+            "{name}"
+        );
+        for f in index.frames.iter() {
+            let g = &full_index.frames[offset + f.decode_index as usize];
+            assert_eq!(
+                (f.pts, f.size_bytes, f.frame_type, f.poc),
+                (g.pts, g.size_bytes, g.frame_type, g.poc),
+                "{name} frame {}",
+                f.decode_index
+            );
+        }
+        // Forward, then back: the backward seek reads from the index start.
+        // An open GOP's leading pictures at the start (HEVC fixture) have
+        // no references, as at the start of a file.
+        let last = index.frames.len() as u32 - 1;
+        let second = (1..last)
+            .find(|&i| !index.is_undecodable_leading(i))
+            .unwrap();
+        for i in [0, 7, last, second] {
+            let a = part.frame(i).unwrap();
+            let b = full.frame(offset as u32 + i).unwrap();
+            assert!(a.image.planes == b.image.planes, "{name} frame {i}");
+        }
+    }
+}
+
+#[test]
 fn seek_labels_match_ffmpeg_every_container() {
     // Seeking reads the frames back from the file: by byte position for
     // raw ES, by timestamp for MP4/MKV/TS.

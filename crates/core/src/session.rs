@@ -52,13 +52,16 @@ impl Session {
     /// Starts indexing `path` in the background and returns as soon as the
     /// first frames are indexed. `on_publish` sees every new snapshot of
     /// the growing index (the first one included); [`Self::index`] always
-    /// returns the newest.
+    /// returns the newest. With `start_ns`, indexing starts at the keyframe
+    /// at or before that timestamp (MPEG-TS: possibly the one after), which
+    /// becomes frame 0.
     pub fn open_progressive(
         source: &Source,
+        start_ns: Option<i64>,
         progress: impl FnMut(IndexProgress) + Send + 'static,
         on_publish: impl Fn(&Arc<StreamIndex>) + Send + 'static,
     ) -> Result<Self, Error> {
-        let (handle, analyzer, indexing) = indexer::start(source, progress, on_publish)?;
+        let (handle, analyzer, indexing) = indexer::start(source, start_ns, progress, on_publish)?;
         Ok(Self::new(handle, analyzer, Some(indexing)))
     }
 

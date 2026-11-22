@@ -15,7 +15,13 @@ use streamlens_core::{
 /// Commands from the UI to the worker.
 #[derive(Debug, Clone)]
 pub enum Command {
-    Open(Source),
+    /// Index and open a stream; with `start_ns`, from that timestamp on.
+    /// Index events carry `id` back.
+    Open {
+        source: Source,
+        start_ns: Option<i64>,
+        id: u64,
+    },
     /// Decode and deliver a frame (decode-order index).
     Frame(u32),
     /// Start streaming frames in display order from this display position.
@@ -45,12 +51,13 @@ pub enum Event {
     /// Subscription is live; send commands through this.
     Ready(std_mpsc::Sender<Command>),
     IndexProgress {
+        id: u64,
         frames: u32,
         fraction: Option<f32>,
     },
     /// A new snapshot of the index of the open file; the first one opens
-    /// it, later ones extend it while indexing runs.
-    Index(Arc<StreamIndex>),
+    /// it, later ones extend it while indexing runs. `id` is the `Open`'s.
+    Index(u64, Arc<StreamIndex>),
     Frame(Arc<DecodedFrame>),
     Headers(u32, Arc<Vec<streamlens_core::RecordedNal>>),
     /// Playback reached the last frame (or failed) and stopped.
@@ -178,7 +185,11 @@ impl Worker {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Open(source) => self.open(source),
+            Command::Open {
+                source,
+                start_ns,
+                id,
+            } => self.open(source, start_ns, id),
             Command::Frame(idx) => {
                 self.play = None;
                 self.set_sweep_paused(false);
@@ -231,7 +242,7 @@ impl Worker {
         }
     }
 
-    fn open(&mut self, source: Source) {
+    fn open(&mut self, source: Source, start_ns: Option<i64>, id: u64) {
         self.play = None;
         self.prefetch = None;
         self.sweep = None; // cancel; a new one starts once the file is open
@@ -240,15 +251,16 @@ impl Worker {
         let tx = self.evt_tx.clone();
         let progress = move |p: streamlens_core::IndexProgress| {
             let _ = tx.unbounded_send(Event::IndexProgress {
+                id,
                 frames: p.frames_indexed,
                 fraction: p.fraction,
             });
         };
         let tx = self.evt_tx.clone();
         let on_publish = move |index: &Arc<StreamIndex>| {
-            let _ = tx.unbounded_send(Event::Index(index.clone()));
+            let _ = tx.unbounded_send(Event::Index(id, index.clone()));
         };
-        match Session::open_progressive(&source, progress, on_publish) {
+        match Session::open_progressive(&source, start_ns, progress, on_publish) {
             Ok(mut s) => {
                 s.set_window(self.window);
                 self.session = Some(s);
