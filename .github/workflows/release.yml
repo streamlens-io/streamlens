@@ -33,7 +33,7 @@ jobs:
       # Applies to the C decoders (clang, cmake) and to rustc alike.
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: brew install nasm cmake
@@ -41,7 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache vendored decoders
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             vendor/ffmpeg-prefix
@@ -73,14 +73,14 @@ jobs:
           ./packaging/macos-dmg.sh target/StreamLens.app "$name.dmg"
           shasum -a 256 "$name.dmg" > "$name.dmg.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: streamlens-${{ matrix.target }}
           path: streamlens-*.dmg*
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: streamlens-*.dmg*
 
@@ -99,7 +99,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             arch: aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: |
@@ -110,7 +110,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache vendored decoders
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             vendor/ffmpeg-prefix
@@ -152,7 +152,7 @@ jobs:
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
           sha256sum "$name.AppImage" > "$name.AppImage.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: streamlens-${{ matrix.target }}
           path: |
@@ -161,7 +161,7 @@ jobs:
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             streamlens-*.tar.gz*
@@ -174,7 +174,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -189,7 +189,7 @@ jobs:
             mingw-w64-x86_64-rust
 
       - name: Cache vendored decoders
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             vendor/ffmpeg-prefix
@@ -221,13 +221,13 @@ jobs:
           zip -r "$name.zip" "$name"
           sha256sum "$name.zip" > "$name.zip.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: streamlens-x86_64-pc-windows-gnu
           path: streamlens-*.zip*
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: streamlens-*.zip*
