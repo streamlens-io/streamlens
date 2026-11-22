@@ -110,6 +110,21 @@ fn main() {
         "macos" => {
             println!("cargo:rustc-link-lib=c++");
             println!("cargo:rustc-link-lib=m");
+            // libde265's x86 code calls __builtin_cpu_supports, whose
+            // helpers (___cpu_model, ___cpu_indicator_init) live in clang's
+            // runtime library; rustc links with -nodefaultlibs, so it has
+            // to be named explicitly.
+            let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+            let resource_dir = std::process::Command::new(&cc)
+                .arg("-print-resource-dir")
+                .output()
+                .expect("run the C compiler to find clang's runtime library");
+            let resource_dir = String::from_utf8_lossy(&resource_dir.stdout);
+            println!(
+                "cargo:rustc-link-search=native={}/lib/darwin",
+                resource_dir.trim()
+            );
+            println!("cargo:rustc-link-lib=static=clang_rt.osx");
         }
         // MinGW (x86_64-pc-windows-gnu): no separate libm, and libavutil's
         // random_seed uses BCryptGenRandom.
