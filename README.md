@@ -51,11 +51,6 @@ commit), applies the patches from `vendor/patches/` (which add per-block
 analysis export), and installs static libraries into `vendor/`. Nothing is
 installed system-wide.
 
-## Note on current state
-This is a work-in-progress. I had a personal need for this, and the existing products were simply way too expensive.
-The current state is not perfect, but the goal is to continue to improve on it. 
-Reporting issues, feature requests, and contributions are all welcome : )
-
 ## License
 
 streamlens is licensed under [MIT](LICENSE-MIT) or
