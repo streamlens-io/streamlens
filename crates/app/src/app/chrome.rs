@@ -1,13 +1,14 @@
 //! Window chrome around the panes: toolbar, chart strip with legend and
 //! time ruler, status bar.
 
-use iced::widget::{button, container, row, shader, text};
+use iced::widget::{button, canvas, container, row, shader, text};
 use iced::{Element, Fill, Theme};
 use streamlens_types::FrameType;
 
 use crate::theme;
 use crate::widgets::barchart::{BarChart, ChartOrder};
 use crate::widgets::frame_view::{ChannelMode, ColorMatrix, Zoom};
+use crate::widgets::overview::Overview;
 
 use super::{frame_type_name, title_style_container, App, Message, Overlay, Playback};
 
@@ -29,6 +30,7 @@ impl App {
             theme::flat("▶│", Message::Step(1)),
             theme::flat("▶▶│", Message::GoEnd),
             theme::segment("Fast", fast, Message::FastPlay),
+            theme::flat("Go to…", Message::ToggleGoto),
         ]);
 
         let zoom = theme::group([
@@ -218,7 +220,7 @@ impl App {
         let Some(index) = &self.index else {
             return row![].into();
         };
-        let (first, bar_width) = self.chart_view;
+        let (first, bar_width, _) = self.chart_view;
         let mut labels = row![].spacing(0);
         // One label roughly every 140 px, snapped to a bar-grid multiple.
         let step = (140.0 / bar_width.max(0.5)).ceil() as usize;
@@ -249,6 +251,40 @@ impl App {
             bar += step;
         }
         container(labels).padding([0, 4]).height(16).into()
+    }
+
+    /// The whole stream under the chart; see [`Overview`].
+    pub(super) fn overview_strip(&self) -> Element<'_, Message> {
+        let Some(index) = &self.index else {
+            return row![].into();
+        };
+        let current = match self.order {
+            ChartOrder::Decode => self.current,
+            ChartOrder::Display => index.frames[self.current as usize].display_index,
+        };
+        let (first, _, visible) = self.chart_view;
+        container(
+            canvas(Overview {
+                total: self.overview_total(),
+                indexed: index.frames.len() as f32,
+                window: (first, visible),
+                current: current as f32,
+            })
+            .width(Fill)
+            .height(10),
+        )
+        .padding([0, 4])
+        .into()
+    }
+
+    /// Frames in the whole stream: the index length once complete, else
+    /// estimated from the indexing progress.
+    pub(super) fn overview_total(&self) -> f32 {
+        let n = self.index.as_ref().map_or(0, |i| i.frames.len()) as f32;
+        match self.indexing {
+            Some((frames, Some(fraction))) if fraction > 0.0 => (frames as f32 / fraction).max(n),
+            _ => n,
+        }
     }
 
     pub(super) fn status_bar(&self) -> Element<'_, Message> {

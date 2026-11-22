@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use iced::mouse;
 use iced::wgpu;
 use iced::widget::shader::{self, Viewport};
+use iced::{keyboard, mouse};
 use iced::{Event, Rectangle};
 use streamlens_core::StreamIndex;
 
@@ -28,9 +28,13 @@ pub enum Interaction {
     Select(u32),
     /// A bar is hovered (tooltip / status bar).
     Hover(Option<u32>),
-    /// Scroll/zoom changed: (first visible bar, bar width px) — drives the
-    /// time ruler under the chart.
-    View { first: f32, bar_width: f32 },
+    /// Scroll/zoom/size changed: first visible bar, bar width px and the
+    /// number of visible bars — drives the time ruler and the overview.
+    View {
+        first: f32,
+        bar_width: f32,
+        visible: f32,
+    },
 }
 
 pub struct BarChart<'a> {
@@ -57,6 +61,10 @@ pub struct ChartState {
     pub bar_width: f32,
     /// Selection the view last auto-followed.
     followed: Option<u32>,
+    /// Width the view was last published for.
+    width: f32,
+    /// Cmd (macOS) / Ctrl turns the scroll wheel into zoom.
+    modifiers: keyboard::Modifiers,
 }
 
 impl Default for ChartState {
@@ -65,6 +73,8 @@ impl Default for ChartState {
             scroll: 0.0,
             bar_width: 4.0,
             followed: None,
+            width: 0.0,
+            modifiers: keyboard::Modifiers::default(),
         }
     }
 }
@@ -83,8 +93,22 @@ where
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
+        if let Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
+            state.modifiers = *m;
+            return None;
+        }
         let index = self.index?;
         let n = index.frames.len() as f32;
+        let view = |state: &ChartState| {
+            shader::Action::publish(
+                Interaction::View {
+                    first: state.scroll,
+                    bar_width: state.bar_width,
+                    visible: bounds.width / state.bar_width,
+                }
+                .into(),
+            )
+        };
 
         // Keep the selected frame in view while stepping/playing.
         if self.selected != state.followed {
@@ -94,42 +118,38 @@ where
                 let visible = bounds.width / state.bar_width;
                 if bar < state.scroll + 1.0 || bar > state.scroll + visible - 2.0 {
                     state.scroll = (bar - visible / 2.0).clamp(0.0, (n - visible).max(0.0));
-                    return Some(shader::Action::publish(
-                        Interaction::View {
-                            first: state.scroll,
-                            bar_width: state.bar_width,
-                        }
-                        .into(),
-                    ));
+                    state.width = bounds.width;
+                    return Some(view(state));
                 }
             }
+        }
+        if state.width != bounds.width {
+            state.width = bounds.width;
+            return Some(view(state));
         }
 
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let pos = cursor.position_in(bounds)?;
-                let (dx, dy) = match delta {
-                    mouse::ScrollDelta::Lines { x, y } => (*x * 30.0, *y),
-                    mouse::ScrollDelta::Pixels { x, y } => (*x, *y / 40.0),
+                // A wheel notch pans 60 px, as in iced's scrollable; zoom
+                // takes 20 % per notch.
+                let (pan, zoom) = match delta {
+                    mouse::ScrollDelta::Lines { x, y } => ((*x + *y) * 60.0, *y * 0.2),
+                    mouse::ScrollDelta::Pixels { x, y } => (*x + *y, *y / 200.0),
                 };
-                if dy != 0.0 {
+                if state.modifiers.command() {
                     // Zoom bar width around the cursor.
                     let at = state.scroll + pos.x / state.bar_width;
-                    let factor = (1.0 + dy * 0.2).clamp(0.5, 2.0);
+                    let factor = (1.0 + zoom).clamp(0.5, 2.0);
                     state.bar_width = (state.bar_width * factor).clamp(0.5, 64.0);
                     state.scroll = at - pos.x / state.bar_width;
-                } else if dx != 0.0 {
-                    state.scroll += dx / state.bar_width;
+                } else {
+                    // Either axis pans, in the direction scrollable uses.
+                    state.scroll -= pan / state.bar_width;
                 }
                 let visible = bounds.width / state.bar_width;
                 state.scroll = state.scroll.clamp(0.0, (n - visible).max(0.0));
-                Some(shader::Action::publish(
-                    Interaction::View {
-                        first: state.scroll,
-                        bar_width: state.bar_width,
-                    }
-                    .into(),
-                ))
+                Some(view(state))
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let pos = cursor.position_in(bounds)?;
@@ -452,5 +472,60 @@ mod pipeline {
             pass.set_vertex_buffer(0, bars.slice(..));
             pass.draw(0..4, 0..count);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::shader::Program;
+    use iced::{Point, Size};
+
+    #[test]
+    fn scroll_pans_and_command_scroll_zooms() {
+        // 75 frames; 200 px at 4 px per bar shows 50.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/h264_prog.mp4");
+        let (index, _) = streamlens_core::Indexer
+            .index(std::path::Path::new(path), |_| {})
+            .unwrap();
+        let index = Arc::new(index);
+        let chart = BarChart {
+            index: Some(&index),
+            selected: None,
+            order: ChartOrder::Decode,
+            qp_graph: false,
+            psnr_graph: None,
+            bits_split: None,
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 100.0));
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 50.0));
+        let mut state = ChartState::default();
+        let mut send = |event: Event| {
+            Program::<Interaction>::update(&chart, &mut state, &event, bounds, cursor);
+            (state.scroll, state.bar_width)
+        };
+        let wheel = |y: f32| {
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y },
+            })
+        };
+
+        // The first event publishes the view size.
+        send(Event::Mouse(mouse::Event::CursorEntered));
+        // A notch down pans 60 px forward, up pans back; no zoom.
+        assert_eq!(send(wheel(-1.0)), (15.0, 4.0));
+        assert_eq!(send(wheel(1.0)), (0.0, 4.0));
+        // A trackpad swipe left pans forward too, clamped at the end.
+        let swipe = Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels { x: -400.0, y: 0.0 },
+        });
+        assert_eq!(send(swipe), (25.0, 4.0));
+        // With Cmd/Ctrl the wheel zooms around the cursor.
+        send(Event::Keyboard(keyboard::Event::ModifiersChanged(
+            keyboard::Modifiers::COMMAND,
+        )));
+        let (scroll, width) = send(wheel(1.0));
+        assert!((width - 4.8).abs() < 1e-4, "{width}");
+        assert!((scroll + 100.0 / width - (25.0 + 100.0 / 4.0)).abs() < 1e-3);
     }
 }

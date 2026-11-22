@@ -20,10 +20,12 @@ use crate::settings::Settings;
 use crate::widgets::barchart::{self, ChartOrder};
 use crate::widgets::frame_view::{self, ChannelMode, ColorMatrix, Zoom};
 use crate::widgets::overlays::{Glyph, OverlaySettings, Segment};
+use crate::widgets::overview;
 use crate::worker::{self, Command};
 
 mod chrome;
 mod dialogs;
+mod goto;
 mod panes;
 mod update;
 
@@ -110,7 +112,8 @@ pub struct App {
     qp_graph: bool,
     /// Draw chart bars as stacked intra/inter/skip bit shares (sweep data).
     bits_split: bool,
-    chart_view: (f32, f32),
+    /// The chart's first visible bar, bar width px and visible bars.
+    chart_view: (f32, f32, f32),
     zoom: Zoom,
     view_center: (f32, f32),
     effective_zoom: f32,
@@ -158,6 +161,10 @@ pub struct App {
     settings_open: bool,
     url_open: bool,
     url_input: String,
+    goto_open: bool,
+    goto_input: String,
+    /// Why the last "Go to" input was not accepted.
+    goto_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +190,8 @@ pub enum Message {
     OpenDialog,
     FileChosen(Option<PathBuf>),
     Chart(barchart::Interaction),
+    /// Click or drag on the overview strip.
+    Overview(overview::Seek),
     Video(frame_view::Interaction),
     SelectFrame(u32),
     /// Step in display order (what the eye expects).
@@ -226,6 +235,10 @@ pub enum Message {
     ToggleUrlDialog,
     UrlInput(String),
     OpenUrl,
+    /// Opens or closes the "Go to" dialog.
+    ToggleGoto,
+    GotoInput(String),
+    Goto,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -242,6 +255,12 @@ pub enum Overlay {
 impl From<barchart::Interaction> for Message {
     fn from(i: barchart::Interaction) -> Self {
         Message::Chart(i)
+    }
+}
+
+impl From<overview::Seek> for Message {
+    fn from(s: overview::Seek) -> Self {
+        Message::Overview(s)
     }
 }
 
@@ -288,7 +307,7 @@ impl App {
             qp_graph: true,
             // Debug/testing hook: STREAMLENS_BITS_SPLIT=1
             bits_split: std::env::var("STREAMLENS_BITS_SPLIT").as_deref() == Ok("1"),
-            chart_view: (0.0, 4.0),
+            chart_view: (0.0, 4.0, 0.0),
             zoom: Zoom::Fit,
             view_center: (0.0, 0.0),
             effective_zoom: 1.0,
@@ -320,6 +339,9 @@ impl App {
             settings_open: std::env::var("STREAMLENS_SETTINGS_OPEN").as_deref() == Ok("1"),
             url_open: false,
             url_input: String::new(),
+            goto_open: false,
+            goto_input: String::new(),
+            goto_error: None,
         };
         (app, Task::none())
     }
@@ -352,6 +374,7 @@ impl App {
                 Key::Named(Named::End) => Some(Message::GoEnd),
                 Key::Named(Named::Space) => Some(Message::PlayPause),
                 Key::Character("o") if modifiers.command() => Some(Message::OpenDialog),
+                Key::Character("g") if modifiers.command() => Some(Message::ToggleGoto),
                 Key::Character("+") | Key::Character("=") => Some(Message::ZoomIn),
                 Key::Character("-") => Some(Message::ZoomOut),
                 Key::Character("0") => Some(Message::ZoomFit),
@@ -391,6 +414,7 @@ impl App {
             self.legend_row(),
             container(self.chart_strip()).height(150).padding([0, 4]),
             self.time_ruler(),
+            self.overview_strip(),
             grid,
             self.status_bar(),
         ]
@@ -413,6 +437,8 @@ impl App {
             self.with_settings_dialog(root.into())
         } else if self.url_open {
             self.with_url_dialog(root.into())
+        } else if self.goto_open {
+            self.with_goto_dialog(root.into())
         } else {
             root.into()
         }
