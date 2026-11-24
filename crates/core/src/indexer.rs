@@ -54,6 +54,7 @@ impl Indexer {
             &analyzer,
             &source,
             None,
+            None,
             &AtomicBool::new(false),
             &mut progress,
             &mut |snapshot| last = Some(snapshot),
@@ -77,13 +78,28 @@ impl Drop for Indexing {
 
 /// Starts indexing `path` on a background thread and returns once the first
 /// snapshot is published (for short files, the complete index).
-/// `on_publish` sees every snapshot, the first one included.
+/// `on_publish` sees every snapshot, the first one included. With
+/// `start_ns`, the pass starts at the keyframe at or before that timestamp
+/// (MPEG-TS seeks by timestamp search and can land on the one after it);
+/// frames before it are not indexed.
 pub(crate) fn start(
     source: &Source,
+    start_ns: Option<i64>,
     mut progress: impl FnMut(IndexProgress) + Send + 'static,
     on_publish: impl Fn(&Arc<StreamIndex>) + Send + 'static,
 ) -> Result<(IndexHandle, SharedAnalyzer, Indexing), Error> {
-    let (mut demuxer, analyzer) = open(source)?;
+    let (mut demuxer, mut analyzer) = open(source)?;
+    let start_ns = match start_ns.map(|ts| demuxer.seek(Some(ts), 0)) {
+        None => None,
+        Some(Ok(())) => start_ns,
+        Some(Err(e)) => {
+            // The HLS demuxer refuses timestamps before the first packet it
+            // read; index from the beginning instead.
+            log::warn!("cannot start indexing at {start_ns:?} ({e}); starting from the beginning");
+            (demuxer, analyzer) = open(source)?;
+            None
+        }
+    };
     let analyzer: SharedAnalyzer = Arc::new(Mutex::new(analyzer));
     let cancel = Arc::new(AtomicBool::new(false));
     let (first_tx, first_rx) = mpsc::channel::<Result<IndexHandle, Error>>();
@@ -111,6 +127,7 @@ pub(crate) fn start(
                 &mut demuxer,
                 &thread_analyzer,
                 &source,
+                start_ns,
                 Some(Duration::from_millis(200)),
                 &thread_cancel,
                 &mut progress,
@@ -145,11 +162,14 @@ fn open(source: &Source) -> Result<(Demuxer, Box<dyn AuAnalyzer>), Error> {
 /// Analyzes every access unit and publishes snapshots: every `interval`
 /// when set, and always a complete one at the end. Keyframes that lack
 /// in-band parameter sets get an insertion recorded, so a decode can start
-/// at any keyframe.
+/// at any keyframe. `start_ns` is where the demuxer was positioned; the
+/// pass then begins at the first keyframe.
+#[allow(clippy::too_many_arguments)]
 fn run_pass(
     demuxer: &mut Demuxer,
     analyzer: &Mutex<Box<dyn AuAnalyzer>>,
     source: &Source,
+    start_ns: Option<i64>,
     interval: Option<Duration>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(IndexProgress),
@@ -164,6 +184,8 @@ fn run_pass(
         Source::Url(_) => demuxer.format_name().to_string(),
     };
     let mut builder = Builder::new(demuxer.codec(), source, container);
+    builder.start_ns = start_ns;
+    builder.span_ns = demuxer.span_ns();
 
     // MP4/MKV keep the parameter sets in the track header; the analyzer
     // needs them, but they belong to no frame.
@@ -174,10 +196,17 @@ fn run_pass(
 
     let mut last_publish = Instant::now();
     let mut analyzed = 0u32;
+    // A seek can land before the keyframe (MPEG-TS seeks by timestamp
+    // search); frames before it reference pictures that were never read.
+    let mut to_keyframe = start_ns.is_some();
     while let Some(au) = demuxer.read()? {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
+        if to_keyframe && !au.keyframe {
+            continue;
+        }
+        to_keyframe = false;
         let mut a = lock();
         // Packets without a picture (parameter sets only) are no frame;
         // the source reader passes them on with the next one.
@@ -242,6 +271,8 @@ struct Builder {
     codec: Codec,
     source: Source,
     container: String,
+    start_ns: Option<i64>,
+    span_ns: Option<(i64, i64)>,
     frames: Chunked<FrameRecord>,
     analysis: Chunked<AuSummary>,
     display_to_decode: Chunked<u32>,
@@ -266,6 +297,8 @@ impl Builder {
             codec,
             source: source.clone(),
             container,
+            start_ns: None,
+            span_ns: None,
             frames: Chunked::default(),
             analysis: Chunked::default(),
             display_to_decode: Chunked::default(),
@@ -383,6 +416,8 @@ impl Builder {
             stats: self.stats.stats(),
             diagnostics: self.diags.clone(),
             source: self.source.clone(),
+            start_ns: self.start_ns,
+            span_ns: self.span_ns,
             video_bytes: self.stats.video_bytes,
             insertions: self.insertions.clone(),
             complete,
@@ -491,6 +526,7 @@ mod tests {
                 &mut demuxer,
                 &analyzer,
                 &fixture(name).into(),
+                None,
                 Some(Duration::ZERO),
                 &AtomicBool::new(false),
                 &mut |_| {},

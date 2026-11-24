@@ -52,6 +52,12 @@ pub struct StreamIndex {
     pub diagnostics: Diagnostics,
     /// The analyzed file or URL; decoding reads the frames back from it.
     pub source: streamlens_media::Source,
+    /// The pass started at this timestamp (ns) instead of the beginning:
+    /// frame 0 is the first keyframe the demuxer reached from there.
+    pub start_ns: Option<i64>,
+    /// Start time and duration of the whole input in ns, when the
+    /// container reports a duration.
+    pub span_ns: Option<(i64, i64)>,
     /// Total size of the video track's frames in the file.
     pub video_bytes: u64,
     /// Keyframes that get parameter sets inserted (decode index → what).

@@ -109,8 +109,11 @@ impl App {
         &'a self,
         base: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        let go =
-            (self.index.is_some() && !self.goto_input.trim().is_empty()).then_some(Message::Goto);
+        let go = match self.goto_outside {
+            Some(at) => Some(Message::StartAt(at)),
+            None => (self.index.is_some() && !self.goto_input.trim().is_empty())
+                .then_some(Message::Goto),
+        };
         let mut content = column![
             text("Go to").size(16),
             text("A time from the start (1:30:00, 90m, 5400s) or a frame number (#1234).")
@@ -127,13 +130,32 @@ impl App {
         if let Some(e) = &self.goto_error {
             content = content.push(text(e).size(11).style(text::danger));
         }
+        if self.goto_outside.is_some() {
+            content = content.push(
+                text(format!(
+                    "{} is not loaded yet. Start reading from there? It becomes the \
+                     new start: frames count from the nearest keyframe, and earlier \
+                     frames are not included.",
+                    self.goto_input.trim()
+                ))
+                .size(12),
+            );
+        }
         content = content.push(
             row![
                 iced::widget::space::horizontal(),
                 button(text("Cancel").size(12))
                     .style(button::text)
                     .on_press(Message::ToggleGoto),
-                button(text("Go").size(12)).on_press_maybe(go),
+                button(
+                    text(if self.goto_outside.is_some() {
+                        "Start here"
+                    } else {
+                        "Go"
+                    })
+                    .size(12)
+                )
+                .on_press_maybe(go),
             ]
             .spacing(8),
         );

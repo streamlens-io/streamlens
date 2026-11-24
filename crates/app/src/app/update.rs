@@ -44,7 +44,7 @@ impl App {
                 Message::FileChosen,
             ),
             Message::FileChosen(Some(path)) => {
-                self.open(Source::File(path));
+                self.open(Source::File(path), None);
                 Task::none()
             }
             Message::ToggleUrlDialog => {
@@ -61,7 +61,7 @@ impl App {
             }
             Message::OpenUrl => {
                 self.url_open = false;
-                self.open(Source::parse(&self.url_input.clone()));
+                self.open(Source::parse(&self.url_input.clone()), None);
                 Task::none()
             }
             Message::FileChosen(None) => Task::none(),
@@ -78,15 +78,37 @@ impl App {
                 self.chart_view = (first, bar_width, visible);
                 Task::none()
             }
-            Message::Overview(overview::Seek(fraction)) => {
-                let Some(index) = &self.index else {
+            Message::Overview(overview::Seek { fraction, press }) => {
+                // A drag that opened the "Go to" dialog continues under it.
+                let dialog = self.goto_open || self.url_open || self.settings_open;
+                let Some(index) = self.index.clone().filter(|_| !dialog) else {
                     return Task::none();
                 };
-                let last = index.frames.len() as u32 - 1;
-                let bar = ((fraction * self.overview_total()) as u32).min(last);
-                let target = match self.order {
-                    ChartOrder::Decode => Some(bar),
-                    ChartOrder::Display => index.decode_for_display(bar),
+                let target = match goto::timeline(&index) {
+                    Some((origin, len)) => {
+                        let t = (fraction as f64 * len as f64) as i64;
+                        match goto::resolve(&index, goto::Target::Time(t)) {
+                            Ok(goto::Resolved::Frame(d)) => Some(d),
+                            // A click outside the indexed part offers to
+                            // start there; a drag stops at its edge.
+                            Ok(goto::Resolved::Outside(at)) if press => {
+                                self.goto_open = true;
+                                self.goto_input = goto::format_duration(t);
+                                self.goto_error = None;
+                                self.goto_outside = Some(at);
+                                return iced::widget::operation::focus(dialogs::GOTO_INPUT);
+                            }
+                            _ => Some(goto::frame_at(&index, origin + t)),
+                        }
+                    }
+                    None => {
+                        let last = index.frames.len() as u32 - 1;
+                        let bar = ((fraction * self.overview_total()) as u32).min(last);
+                        match self.order {
+                            ChartOrder::Decode => Some(bar),
+                            ChartOrder::Display => index.decode_for_display(bar),
+                        }
+                    }
                 };
                 match target {
                     Some(t) if t != self.current => self.select_frame(t),
@@ -96,6 +118,7 @@ impl App {
             Message::ToggleGoto => {
                 self.goto_open = !self.goto_open;
                 self.goto_error = None;
+                self.goto_outside = None;
                 if self.goto_open {
                     iced::widget::operation::focus(dialogs::GOTO_INPUT)
                 } else {
@@ -105,6 +128,7 @@ impl App {
             Message::GotoInput(s) => {
                 self.goto_input = s;
                 self.goto_error = None;
+                self.goto_outside = None;
                 Task::none()
             }
             Message::Goto => {
@@ -112,9 +136,13 @@ impl App {
                     return Task::none();
                 };
                 match goto::parse(&self.goto_input).and_then(|t| goto::resolve(index, t)) {
-                    Ok(decode_index) => {
+                    Ok(goto::Resolved::Frame(decode_index)) => {
                         self.goto_open = false;
                         self.select_frame(decode_index)
+                    }
+                    Ok(goto::Resolved::Outside(at)) => {
+                        self.goto_outside = Some(at);
+                        Task::none()
                     }
                     Err(e) => {
                         self.goto_error = Some(e);
@@ -327,6 +355,22 @@ impl App {
                 }
                 Task::none()
             }
+            Message::StartAt(at) => {
+                self.goto_open = false;
+                self.goto_outside = None;
+                let Some(source) = self.file.clone() else {
+                    return Task::none();
+                };
+                // At or before the stream start, that is a plain open.
+                let start = self
+                    .index
+                    .as_ref()
+                    .and_then(|i| i.span_ns)
+                    .is_some_and(|(start, _)| at > start)
+                    .then_some(at);
+                self.open(source, start);
+                Task::none()
+            }
             Message::ReferenceChosen(path) => {
                 self.ref_path = path.clone();
                 if let Some(tx) = &self.worker {
@@ -402,17 +446,20 @@ impl App {
                 let _ = tx.send(Command::SetWindow(self.settings.window()));
                 self.worker = Some(tx);
                 if let Some(path) = self.file.clone() {
-                    self.open(path);
+                    self.open(path, None);
                 }
             }
-            worker::Event::IndexProgress { frames, fraction } => {
+            worker::Event::IndexProgress { id, .. } | worker::Event::Index(id, _)
+                if id != self.open_id =>
+            {
+                // From a stream opened before the latest Open.
+            }
+            worker::Event::IndexProgress {
+                frames, fraction, ..
+            } => {
                 self.indexing = Some((frames, fraction));
             }
-            worker::Event::Index(index) => {
-                // A late snapshot of a previously opened file.
-                if self.file.as_ref() != Some(&index.source) {
-                    return Task::none();
-                }
+            worker::Event::Index(_, index) => {
                 if index.complete {
                     self.indexing = None;
                 }
@@ -526,12 +573,17 @@ impl App {
         Task::none()
     }
 
-    fn open(&mut self, source: Source) {
+    fn open(&mut self, source: Source, start_ns: Option<i64>) {
         self.reset_stream_state();
         self.file = Some(source.clone());
         self.indexing = Some((0, None));
+        self.open_id += 1;
         if let Some(tx) = &self.worker {
-            let _ = tx.send(Command::Open(source));
+            let _ = tx.send(Command::Open {
+                source,
+                start_ns,
+                id: self.open_id,
+            });
         }
     }
 

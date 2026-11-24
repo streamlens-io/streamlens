@@ -96,6 +96,9 @@ pub struct App {
     index: Option<Arc<StreamIndex>>,
     indexing: Option<(u32, Option<f32>)>,
     file: Option<Source>,
+    /// Id of the latest `Command::Open`; index events of earlier ones are
+    /// stale.
+    open_id: u64,
     /// Window width in logical pixels; the toolbar reflows below a
     /// breakpoint instead of clipping.
     window_width: f32,
@@ -165,6 +168,9 @@ pub struct App {
     goto_input: String,
     /// Why the last "Go to" input was not accepted.
     goto_error: Option<String>,
+    /// The "Go to" target is outside the indexed part: indexing can start
+    /// again at this timestamp (ns).
+    goto_outside: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +245,8 @@ pub enum Message {
     ToggleGoto,
     GotoInput(String),
     Goto,
+    /// Index again from this timestamp (ns), which becomes frame 0.
+    StartAt(i64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,6 +298,7 @@ impl App {
             index: None,
             indexing: None,
             file: std::env::args().nth(1).map(|a| Source::parse(&a)),
+            open_id: 0,
             // Matches main.rs's initial window size (resize events only
             // arrive on change); the STREAMLENS_WINDOW hook overrides both.
             window_width: std::env::var("STREAMLENS_WINDOW")
@@ -342,6 +351,7 @@ impl App {
             goto_open: false,
             goto_input: String::new(),
             goto_error: None,
+            goto_outside: None,
         };
         (app, Task::none())
     }
