@@ -1,14 +1,12 @@
 //! Container demuxing with libavformat: yields the first H.264/H.265 track
 //! of a file as Annex B access units, one per picture.
 
-use std::ffi::CString;
-use std::path::Path;
-
 use streamlens_types::Codec;
 
 use crate::annexb::{self, LengthPrefixed};
 use crate::ffi::ffmpeg::*;
 use crate::ffi::{av_error_string, AVERROR_EOF, AV_NOPTS_VALUE};
+use crate::input::{self, Source};
 use crate::Error;
 
 /// One access unit as read from the container. Borrows the demuxer;
@@ -37,6 +35,10 @@ pub struct Demuxer {
     time_base: AVRational,
     codec: Codec,
     file_size: i64,
+    /// Start and length of the input in ns, for progress when the size is
+    /// unknown or packet positions are not file positions (HLS).
+    span_ns: Option<(i64, i64)>,
+    format_name: String,
     /// Set for MP4/MKV/FLV-style tracks; `None` for Annex B tracks.
     length_prefixed: Option<LengthPrefixed>,
     /// Conversion buffer for length-prefixed samples.
@@ -47,8 +49,8 @@ pub struct Demuxer {
 unsafe impl Send for Demuxer {}
 
 impl Demuxer {
-    pub fn open(path: &Path) -> Result<Self, Error> {
-        let cpath = path_to_cstring(path)?;
+    pub fn open(source: &Source) -> Result<Self, Error> {
+        let cpath = source.to_cstring()?;
         let mut d = Demuxer {
             fmt: std::ptr::null_mut(),
             pkt: std::ptr::null_mut(),
@@ -56,21 +58,39 @@ impl Demuxer {
             time_base: AVRational { num: 0, den: 1 },
             codec: Codec::H264,
             file_size: -1,
+            span_ns: None,
+            format_name: String::new(),
             length_prefixed: None,
             buf: Vec::new(),
         };
         // SAFETY: every pointer is checked before use; `d`'s Drop frees
         // whatever was allocated when an early return happens.
         unsafe {
-            check(
-                "avformat_open_input",
-                avformat_open_input(
-                    &mut d.fmt,
-                    cpath.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                ),
-            )?;
+            // Info level logs every HLS segment open.
+            static QUIET: std::sync::Once = std::sync::Once::new();
+            QUIET.call_once(|| av_log_set_level(AV_LOG_WARNING as i32));
+            d.fmt = avformat_alloc_context();
+            if d.fmt.is_null() {
+                return Err(Error::Ffmpeg {
+                    call: "avformat_alloc_context",
+                    msg: "out of memory".into(),
+                });
+            }
+            input::verify_tls(d.fmt);
+            // HLS segments are often served without a file extension
+            // (`item-00000001`), which the demuxer otherwise refuses.
+            let mut options: *mut AVDictionary = std::ptr::null_mut();
+            av_dict_set(&mut options, c"extension_picky".as_ptr(), c"0".as_ptr(), 0);
+            let ret =
+                avformat_open_input(&mut d.fmt, cpath.as_ptr(), std::ptr::null(), &mut options);
+            av_dict_free(&mut options);
+            check("avformat_open_input", ret)?;
+            d.format_name = std::ffi::CStr::from_ptr((*(*d.fmt).iformat).name)
+                .to_string_lossy()
+                .split(',')
+                .next()
+                .unwrap_or_default()
+                .to_string();
             check(
                 "avformat_find_stream_info",
                 avformat_find_stream_info(d.fmt, std::ptr::null_mut()),
@@ -117,8 +137,21 @@ impl Demuxer {
                     msg: "out of memory".into(),
                 });
             }
-            if !(*d.fmt).pb.is_null() {
+            // Packet positions of a format without byte seeking (HLS, DASH)
+            // are offsets in a segment, not in the input that was opened.
+            let byte_positions = (*(*d.fmt).iformat).flags & AVFMT_NO_BYTE_SEEK as i32 == 0;
+            if byte_positions && !(*d.fmt).pb.is_null() {
                 d.file_size = avio_size((*d.fmt).pb);
+            }
+            let (start, duration) = ((*d.fmt).start_time, (*d.fmt).duration);
+            if duration > 0 {
+                let ns = |t: i64| t * (1_000_000_000 / AV_TIME_BASE as i64);
+                let start = if start == AV_NOPTS_VALUE {
+                    0
+                } else {
+                    ns(start)
+                };
+                d.span_ns = Some((start, ns(duration)));
             }
         }
         Ok(d)
@@ -126,6 +159,11 @@ impl Demuxer {
 
     pub fn codec(&self) -> Codec {
         self.codec
+    }
+
+    /// The demuxer's short name (`mov`, `matroska`, `mpegts`, `hls`, …).
+    pub fn format_name(&self) -> &str {
+        &self.format_name
     }
 
     /// Parameter sets (and any SEI) the container keeps out of band in its
@@ -147,12 +185,14 @@ impl Demuxer {
         let ret = unsafe {
             match ts_ns {
                 Some(ns) => {
-                    // Rounded down so a backward seek cannot land past the
-                    // target.
+                    // Rounded to the nearest tick, which restores the
+                    // packet's exact timestamp (ns came from it). Rounding
+                    // down can land one tick before the stream start, which
+                    // the HLS demuxer refuses.
                     let tb = self.time_base;
-                    let ts = (ns as i128 * tb.den as i128)
-                        .div_euclid(tb.num.max(1) as i128 * 1_000_000_000)
-                        as i64;
+                    let per_tick = tb.num.max(1) as i128 * 1_000_000_000;
+                    let ts =
+                        (ns as i128 * tb.den as i128 + per_tick / 2).div_euclid(per_tick) as i64;
                     av_seek_frame(self.fmt, self.stream, ts, AVSEEK_FLAG_BACKWARD as i32)
                 }
                 None => av_seek_frame(self.fmt, -1, file_offset as i64, AVSEEK_FLAG_BYTE as i32),
@@ -204,8 +244,14 @@ impl Demuxer {
             dts_ns: ns(p.dts),
             duration_ns: (p.duration > 0).then(|| to_ns(p.duration, self.time_base)),
             keyframe: p.flags & AV_PKT_FLAG_KEY as i32 != 0,
-            progress: (self.file_size > 0 && p.pos >= 0)
-                .then(|| (p.pos as f64 / self.file_size as f64) as f32),
+            progress: if self.file_size > 0 && p.pos >= 0 {
+                Some((p.pos as f64 / self.file_size as f64) as f32)
+            } else {
+                // Unknown size (HLS): how far the timestamps are.
+                self.span_ns.zip(ns(p.pts)).map(|((start, len), pts)| {
+                    ((pts - start) as f64 / len as f64).clamp(0.0, 1.0) as f32
+                })
+            },
         }
     }
 }
@@ -237,17 +283,4 @@ fn ffmpeg_error(call: &'static str, code: i32) -> Error {
         call,
         msg: av_error_string(code),
     }
-}
-
-#[cfg(unix)]
-fn path_to_cstring(path: &Path) -> Result<CString, Error> {
-    use std::os::unix::ffi::OsStrExt;
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| Error::InvalidPath)
-}
-
-// FFmpeg's file protocol takes UTF-8 paths on Windows.
-#[cfg(not(unix))]
-fn path_to_cstring(path: &Path) -> Result<CString, Error> {
-    let s = path.to_str().ok_or(Error::InvalidPath)?;
-    CString::new(s).map_err(|_| Error::InvalidPath)
 }

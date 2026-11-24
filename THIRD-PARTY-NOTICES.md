@@ -8,12 +8,23 @@ third-party software:
 
 This software uses libraries from the FFmpeg project (libavformat,
 libavcodec, libavutil) under the LGPLv2.1. The build enables only the H.264
-decoder, the H.264/H.265 parsers, a few demuxers and the file protocol; no
-GPL components are enabled. The sources are modified: the
+decoder, the H.264/H.265 parsers, a few demuxers (including HLS) and the
+file, HTTP(S) and related network protocols; no GPL components are enabled. The sources are modified: the
 patches in `vendor/patches/ffmpeg/` add per-macroblock analysis export.
 License text: `licenses/LGPL-2.1.txt`. Source: <https://ffmpeg.org>, at the
 commit pinned in `vendor/build-decoders.sh`, plus the patches in this
 repository.
+
+On Linux builds, FFmpeg is configured with `--enable-version3` (because of
+mbedTLS, below) and is therefore under the LGPL v3; license text:
+`licenses/LGPL-3.0.txt`.
+
+## mbedTLS — Apache-2.0 (Linux builds only, statically linked)
+
+TLS for HTTPS and HLS input on Linux. macOS and Windows builds use the
+operating system's TLS (SecureTransport, Schannel) instead. License text:
+`LICENSE-APACHE`. Source: <https://github.com/Mbed-TLS/mbedtls>, at the
+release pinned in `vendor/build-decoders.sh`, unmodified.
 
 ## libde265 — LGPL-3.0-or-later (statically linked, modified)
 

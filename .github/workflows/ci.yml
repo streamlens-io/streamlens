@@ -40,6 +40,7 @@ jobs:
           path: |
             vendor/ffmpeg-prefix
             vendor/libde265-prefix
+            vendor/mbedtls-prefix
             vendor/.stamp
           key: vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
 
@@ -92,6 +93,7 @@ jobs:
           path: |
             vendor/ffmpeg-prefix
             vendor/libde265-prefix
+            vendor/mbedtls-prefix
             vendor/.stamp
           key: vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
 

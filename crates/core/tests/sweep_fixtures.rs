@@ -18,7 +18,7 @@ fn sweep_all_frames_present_nonzero_bits() {
     let done_flag = Arc::new(Mutex::new(false));
     let done_clone = done_flag.clone();
 
-    let session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
+    let session = Session::open(fixture("h264_prog.mp4"), |_| {}).unwrap();
     let sweep = Sweep::spawn(session.share(), None, move |_done, _total, batch| {
         let mut r = results_clone.lock().unwrap();
         r.extend(batch);
@@ -78,7 +78,7 @@ fn sweep_psnr_with_reference() {
     let results: Arc<Mutex<Vec<(u32, SweepFrame)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
 
-    let session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
+    let session = Session::open(fixture("h264_prog.mp4"), |_| {}).unwrap();
     let _sweep = Sweep::spawn(
         session.share(),
         Some(fixture("ref_320x240_i420.yuv")),

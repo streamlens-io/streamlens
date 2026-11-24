@@ -46,6 +46,7 @@ jobs:
           path: |
             vendor/ffmpeg-prefix
             vendor/libde265-prefix
+            vendor/mbedtls-prefix
             vendor/.stamp
           key: vendor-${{ matrix.target }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
 
@@ -115,6 +116,7 @@ jobs:
           path: |
             vendor/ffmpeg-prefix
             vendor/libde265-prefix
+            vendor/mbedtls-prefix
             vendor/.stamp
           key: vendor-${{ matrix.target }}-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
 
@@ -194,6 +196,7 @@ jobs:
           path: |
             vendor/ffmpeg-prefix
             vendor/libde265-prefix
+            vendor/mbedtls-prefix
             vendor/.stamp
           key: vendor-windows-${{ hashFiles('vendor/patches/**', 'vendor/build-decoders.sh') }}
 

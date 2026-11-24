@@ -1,7 +1,8 @@
 //! An open stream: index + on-demand decoding + cache. The UI-facing API.
 
-use std::path::Path;
 use std::sync::Arc;
+
+use streamlens_media::Source;
 
 use crate::cache::{CacheWindow, FrameCache};
 use crate::decode::{DecodeService, DecodedFrame};
@@ -39,8 +40,11 @@ pub struct Session {
 impl Session {
     /// Indexes all of `path` and prepares decoding. Blocking; run on a
     /// worker thread and forward `progress` to the UI.
-    pub fn open(path: &Path, progress: impl FnMut(IndexProgress)) -> Result<Self, Error> {
-        let (index, analyzer) = Indexer.index(path, progress)?;
+    pub fn open(
+        source: impl Into<Source>,
+        progress: impl FnMut(IndexProgress),
+    ) -> Result<Self, Error> {
+        let (index, analyzer) = Indexer.index(source, progress)?;
         let analyzer = Arc::new(std::sync::Mutex::new(analyzer));
         Ok(Self::new(IndexHandle::new(Arc::new(index)), analyzer, None))
     }
@@ -50,11 +54,11 @@ impl Session {
     /// the growing index (the first one included); [`Self::index`] always
     /// returns the newest.
     pub fn open_progressive(
-        path: &Path,
+        source: &Source,
         progress: impl FnMut(IndexProgress) + Send + 'static,
         on_publish: impl Fn(&Arc<StreamIndex>) + Send + 'static,
     ) -> Result<Self, Error> {
-        let (handle, analyzer, indexing) = indexer::start(path, progress, on_publish)?;
+        let (handle, analyzer, indexing) = indexer::start(source, progress, on_publish)?;
         Ok(Self::new(handle, analyzer, Some(indexing)))
     }
 

@@ -1,7 +1,7 @@
 # StreamLens
 <img width="1728" height="1049" alt="image" src="https://github.com/user-attachments/assets/93413da1-ee36-429a-8707-4606d63c5678" />
 
-StreamLens is an H.264/H.265 bitstream analyzer that lets you inspect how video is encoded. It offers per-frame size and type analysis, overlays for blocks such as QP, prediction modes, motion vectors, partitions, and bit allocation, reconstruction views for predicted, unfiltered, and residual data, and exact header trees — all with smooth playback.
+StreamLens is an H.264/H.265 bitstream analyzer that lets you inspect how video is encoded. It offers per-frame size and type analysis, overlays for blocks such as QP, prediction modes, motion vectors, partitions, and bit allocation, reconstruction views for predicted, unfiltered, and residual data, and exact header trees — all with smooth playback. It opens local files, HTTP(S) URLs and HLS playlists.
 
 Built in Rust. FFmpeg's libavformat handles demuxing; patched FFmpeg (H.264)
 and libde265 (H.265) decoders, statically linked, expose the per-block
@@ -22,8 +22,8 @@ installed.
 
 ## Build from source
 
-Build dependencies: Rust (stable), git, cmake, a C/C++ toolchain, clang
-(for bindgen), and nasm on x86_64. The tests also need the `ffmpeg` CLI
+Build dependencies: Rust (stable), git, curl, cmake, a C/C++ toolchain,
+clang (for bindgen), and nasm on x86_64. The tests also need the `ffmpeg` CLI
 (pixel reference) and the C smoke tests `pkg-config`.
 
 ```sh

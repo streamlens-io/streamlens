@@ -2,7 +2,6 @@
 //! pass, and what it takes to read each frame back from the file.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use streamlens_syntax::diag::Diagnostics;
@@ -51,8 +50,8 @@ pub struct StreamIndex {
     /// the panel doesn't rescan every frame record per redraw).
     pub stats: StreamStats,
     pub diagnostics: Diagnostics,
-    /// The analyzed file; decoding reads the frames back from it.
-    pub path: PathBuf,
+    /// The analyzed file or URL; decoding reads the frames back from it.
+    pub source: streamlens_media::Source,
     /// Total size of the video track's frames in the file.
     pub video_bytes: u64,
     /// Keyframes that get parameter sets inserted (decode index → what).

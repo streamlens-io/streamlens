@@ -1,6 +1,5 @@
 //! The Elm update: messages, worker events and the state they change.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::widget::pane_grid;
@@ -12,7 +11,9 @@ use crate::widgets::frame_view::{self, ChannelMode, ColorMatrix, Zoom};
 use crate::widgets::overlays::{self};
 use crate::worker::{self, Command};
 
-use super::{App, DiffMode, Message, Overlay, Playback, Stage};
+use streamlens_core::Source;
+
+use super::{dialogs, App, DiffMode, Message, Overlay, Playback, Stage};
 
 impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -32,7 +33,7 @@ impl App {
                             "video",
                             &[
                                 "mp4", "mov", "mkv", "webm", "ts", "264", "h264", "265", "h265",
-                                "avi", "flv",
+                                "avi", "flv", "m3u8",
                             ],
                         )
                         .pick_file()
@@ -42,7 +43,24 @@ impl App {
                 Message::FileChosen,
             ),
             Message::FileChosen(Some(path)) => {
-                self.open(path);
+                self.open(Source::File(path));
+                Task::none()
+            }
+            Message::ToggleUrlDialog => {
+                self.url_open = !self.url_open;
+                if self.url_open {
+                    iced::widget::operation::focus(dialogs::URL_INPUT)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::UrlInput(url) => {
+                self.url_input = url;
+                Task::none()
+            }
+            Message::OpenUrl => {
+                self.url_open = false;
+                self.open(Source::parse(&self.url_input.clone()));
                 Task::none()
             }
             Message::FileChosen(None) => Task::none(),
@@ -343,7 +361,7 @@ impl App {
             }
             worker::Event::Index(index) => {
                 // A late snapshot of a previously opened file.
-                if self.file.as_deref() != Some(index.path.as_path()) {
+                if self.file.as_ref() != Some(&index.source) {
                     return Task::none();
                 }
                 if index.complete {
@@ -459,12 +477,12 @@ impl App {
         Task::none()
     }
 
-    fn open(&mut self, path: PathBuf) {
+    fn open(&mut self, source: Source) {
         self.reset_stream_state();
-        self.file = Some(path.clone());
+        self.file = Some(source.clone());
         self.indexing = Some((0, None));
         if let Some(tx) = &self.worker {
-            let _ = tx.send(Command::Open(path));
+            let _ = tx.send(Command::Open(source));
         }
     }
 

@@ -9,7 +9,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn decodes_frames_via_session() {
-    let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("h264_prog.mp4"), |_| {}).unwrap();
     assert_eq!(session.index().frames.len(), 75);
 
     // A mid-GOP frame: exercises decode-from-keyframe.
@@ -43,7 +43,7 @@ fn decodes_frames_via_session() {
 fn decoded_pixels_match_ffmpeg_reference() {
     // Compare frame 0 (IDR, display order == decode order 0) against
     // ffmpeg's decode of the same fixture.
-    let mut session = Session::open(&fixture("h264_prog.264"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("h264_prog.264"), |_| {}).unwrap();
     let f0 = session.frame(0).unwrap();
 
     let out = std::process::Command::new("ffmpeg")
@@ -72,7 +72,7 @@ fn decoded_pixels_match_ffmpeg_reference() {
 
 #[test]
 fn analysis_meta_flows_through_session_h264() {
-    let mut session = Session::open(&fixture("h264_prog.264"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("h264_prog.264"), |_| {}).unwrap();
     let f0 = session.frame(0).unwrap();
     let a = &*f0.analysis;
     assert_eq!(a.superblock_size, 16);
@@ -117,7 +117,7 @@ fn backward_seek_before_pipeline_start_rebuilds() {
     // Regression: a pipeline that started at a later keyframe was "reused"
     // for targets before its start keyframe and waited forever for a frame
     // it could never emit (playback froze, seeking back hung).
-    let mut session = Session::open(&fixture("h264_prog.mp4"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("h264_prog.mp4"), |_| {}).unwrap();
     let k = session
         .index()
         .frames
@@ -146,7 +146,7 @@ fn hevc_open_gop_seek_handles_rasl() {
     // leading pictures. The emission schedule must not expect them (label
     // desync froze playback mid-file), and a RASL target must decode from
     // one keyframe earlier so its references exist.
-    let mut session = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("hevc_8bit.mp4"), |_| {}).unwrap();
     let index = session.index();
     let Some(r) = index
         .frames
@@ -166,14 +166,14 @@ fn hevc_open_gop_seek_handles_rasl() {
     let trailing = (cra + 1..index.frames.len() as u32)
         .find(|&i| !index.frames[i as usize].is_rasl)
         .unwrap();
-    let mut s2 = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
+    let mut s2 = Session::open(fixture("hevc_8bit.mp4"), |_| {}).unwrap();
     assert_eq!(s2.frame(cra).unwrap().decode_index, cra);
     assert_eq!(s2.frame(trailing).unwrap().decode_index, trailing);
 }
 
 #[test]
 fn hevc_end_to_end() {
-    let mut session = Session::open(&fixture("hevc_8bit.mp4"), |_| {}).unwrap();
+    let mut session = Session::open(fixture("hevc_8bit.mp4"), |_| {}).unwrap();
     assert_eq!(session.index().codec, streamlens_types::Codec::H265);
     assert_eq!(session.index().frames.len(), 75);
     assert_eq!(session.index().info.width, 320);
@@ -300,7 +300,7 @@ fn seek_labels_match_ffmpeg_h264_closed_gop() {
 
 #[test]
 fn seek_labels_match_ffmpeg_h264_open_gop() {
-    let index = Session::open(&fixture("h264_opengop.ts"), |_| {})
+    let index = Session::open(fixture("h264_opengop.ts"), |_| {})
         .unwrap()
         .index()
         .clone();
@@ -317,6 +317,20 @@ fn seek_labels_match_ffmpeg_h264_open_gop() {
 #[test]
 fn seek_labels_match_ffmpeg_hevc() {
     assert_seek_labels_match_ffmpeg("hevc_8bit.mp4");
+}
+
+#[test]
+fn hls_playlist_opens_and_seeks() {
+    // fMP4 HLS: init segment plus 1 s media segments, read through
+    // libavformat's HLS demuxer; seeks land on segment boundaries.
+    let name = "hls/playlist.m3u8";
+    let session = Session::open(fixture(name), |_| {}).unwrap();
+    let index = session.index();
+    assert_eq!(index.frames.len(), 75);
+    assert_eq!(index.info.container, "m3u8");
+    assert_eq!(index.frames.iter().filter(|f| f.is_keyframe).count(), 3);
+    drop(session);
+    assert_seek_labels_match_ffmpeg(name);
 }
 
 #[test]
