@@ -12,6 +12,8 @@ use super::{App, Message};
 
 /// Id of the URL field, focused when the dialog opens.
 pub(super) const URL_INPUT: &str = "open-url";
+/// Id of the "Go to" field, focused when the dialog opens.
+pub(super) const GOTO_INPUT: &str = "go-to";
 
 impl App {
     pub(super) fn with_settings_dialog<'a>(
@@ -101,6 +103,41 @@ impl App {
         ]
         .spacing(10);
         modal(base, content.into(), Message::ToggleUrlDialog)
+    }
+
+    pub(super) fn with_goto_dialog<'a>(
+        &'a self,
+        base: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let go =
+            (self.index.is_some() && !self.goto_input.trim().is_empty()).then_some(Message::Goto);
+        let mut content = column![
+            text("Go to").size(16),
+            text("A time from the start (1:30:00, 90m, 5400s) or a frame number (#1234).")
+                .size(11)
+                .color(theme::DIM),
+            text_input("1:30:00", &self.goto_input)
+                .id(GOTO_INPUT)
+                .on_input(Message::GotoInput)
+                .on_submit_maybe(go.clone())
+                .size(13)
+                .padding(6),
+        ]
+        .spacing(10);
+        if let Some(e) = &self.goto_error {
+            content = content.push(text(e).size(11).style(text::danger));
+        }
+        content = content.push(
+            row![
+                iced::widget::space::horizontal(),
+                button(text("Cancel").size(12))
+                    .style(button::text)
+                    .on_press(Message::ToggleGoto),
+                button(text("Go").size(12)).on_press_maybe(go),
+            ]
+            .spacing(8),
+        );
+        modal(base, content.into(), Message::ToggleGoto)
     }
 }
 

@@ -9,11 +9,12 @@ use crate::panels::Tab;
 use crate::widgets::barchart::{self, ChartOrder};
 use crate::widgets::frame_view::{self, ChannelMode, ColorMatrix, Zoom};
 use crate::widgets::overlays::{self};
+use crate::widgets::overview;
 use crate::worker::{self, Command};
 
 use streamlens_core::Source;
 
-use super::{dialogs, App, DiffMode, Message, Overlay, Playback, Stage};
+use super::{dialogs, goto, App, DiffMode, Message, Overlay, Playback, Stage};
 
 impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -69,9 +70,57 @@ impl App {
                 self.hovered_bar = h;
                 Task::none()
             }
-            Message::Chart(barchart::Interaction::View { first, bar_width }) => {
-                self.chart_view = (first, bar_width);
+            Message::Chart(barchart::Interaction::View {
+                first,
+                bar_width,
+                visible,
+            }) => {
+                self.chart_view = (first, bar_width, visible);
                 Task::none()
+            }
+            Message::Overview(overview::Seek(fraction)) => {
+                let Some(index) = &self.index else {
+                    return Task::none();
+                };
+                let last = index.frames.len() as u32 - 1;
+                let bar = ((fraction * self.overview_total()) as u32).min(last);
+                let target = match self.order {
+                    ChartOrder::Decode => Some(bar),
+                    ChartOrder::Display => index.decode_for_display(bar),
+                };
+                match target {
+                    Some(t) if t != self.current => self.select_frame(t),
+                    _ => Task::none(),
+                }
+            }
+            Message::ToggleGoto => {
+                self.goto_open = !self.goto_open;
+                self.goto_error = None;
+                if self.goto_open {
+                    iced::widget::operation::focus(dialogs::GOTO_INPUT)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::GotoInput(s) => {
+                self.goto_input = s;
+                self.goto_error = None;
+                Task::none()
+            }
+            Message::Goto => {
+                let Some(index) = &self.index else {
+                    return Task::none();
+                };
+                match goto::parse(&self.goto_input).and_then(|t| goto::resolve(index, t)) {
+                    Ok(decode_index) => {
+                        self.goto_open = false;
+                        self.select_frame(decode_index)
+                    }
+                    Err(e) => {
+                        self.goto_error = Some(e);
+                        Task::none()
+                    }
+                }
             }
             Message::Video(frame_view::Interaction::Hover(x, y)) => {
                 self.hovered_pixel = Some((x, y));
